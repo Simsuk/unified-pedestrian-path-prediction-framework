@@ -120,7 +120,7 @@ class GATEncoder(nn.Module):
         return graph_embeded_data
 
 
-class TrajectoryGenerator(nn.Module):
+class STGAT_discriminator(nn.Module):
     def __init__(
         self,
         args,
@@ -139,7 +139,7 @@ class TrajectoryGenerator(nn.Module):
         log_std=None,
         action_dim=2
     ):
-        super(TrajectoryGenerator, self).__init__()
+        super(STGAT_discriminator, self).__init__()
         self.args=args
         self.obs_len = obs_len
         self.pred_len = pred_len
@@ -169,11 +169,11 @@ class TrajectoryGenerator(nn.Module):
         self.graph_lstm_model = nn.LSTMCell(
             graph_network_out_dims, graph_lstm_hidden_size
         )
-        self.traj_hidden2pos = nn.Linear(self.traj_lstm_hidden_size, 2)
+        self.traj_hidden2pos = nn.Linear(self.traj_lstm_hidden_size, 1)
         self.traj_gat_hidden2pos = nn.Linear(
-            self.traj_lstm_hidden_size + self.graph_lstm_hidden_size, 2
-        )
-        self.pred_hidden2pos = nn.Linear(self.pred_lstm_hidden_size, 2)
+            self.traj_lstm_hidden_size + self.graph_lstm_hidden_size, 1
+        ) #NOTE:CHANGED FROM 2 to 1 -> equal to the dimnsion of trajecotry
+        self.pred_hidden2pos = nn.Linear(self.pred_lstm_hidden_size, 1)
 
         self.noise_dim = noise_dim
         self.noise_type = noise_type
@@ -183,16 +183,12 @@ class TrajectoryGenerator(nn.Module):
         )
 
     def init_hidden_traj_lstm(self, batch):
-        if self.args.randomness_definition=="stochastic":
-            torch.manual_seed(42)
         return (
             torch.randn(batch, self.traj_lstm_hidden_size).cuda(),
             torch.randn(batch, self.traj_lstm_hidden_size).cuda(),
         )
 
     def init_hidden_graph_lstm(self, batch):
-        if self.args.randomness_definition=="stochastic":
-            torch.manual_seed(42)
         return (
             torch.randn(batch, self.graph_lstm_hidden_size).cuda(),
             torch.randn(batch, self.graph_lstm_hidden_size).cuda(),
@@ -203,12 +199,9 @@ class TrajectoryGenerator(nn.Module):
         if self.args.randomness_definition=='deterministic':
             z_decoder = get_noise(noise_shape, self.noise_type)
         elif self.args.randomness_definition=='stochastic':
-                    # print("seq_start_end", seq_start_end)
-                    # print("self.fixed_noise", self.fixed_noise)
                     dynamic_noise_shape = [seq_start_end.size(0)] + [1] * (len(self.fixed_noise.shape) - 1)
                     z_decoder = self.fixed_noise.repeat(*dynamic_noise_shape)
         # Repeat the fixed noise for each element in the batch
-        
         _list = []
         for idx, (start, end) in enumerate(seq_start_end):
             start = start.item()
@@ -222,23 +215,11 @@ class TrajectoryGenerator(nn.Module):
         if env.training_step == 1 or env.training_step == 2:
             # x.shape ([bx12,16])
             # actions_mean ([8, 185, 2]
-            # print("get_log_prob nput", x.shape)
-            # print("actions.shape")
             first_iter=int(x.shape[0]/env.obs_len)
-            # print("first_iter", first_iter)
             model_input=x[:first_iter]
-            # print("Weights of traj_hidden2pos layer:", self.traj_hidden2pos.weight.data)
-            # print("Biases of traj_hidden2pos layer:", self.traj_hidden2pos.bias.data)
-            action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 1, env.training_step)
-            action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 1, env.training_step)
-            # print("env.seq_start_end", env.seq_start_end)
-            
-            # print("model_input", model_input[0])
+            action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 0, env.training_step)
             action_mean, action_log_std, action_std = torch.flatten(action_mean, 0,1), torch.flatten(action_log_std, 0,1),torch.flatten(action_std, 0,1)
-            
-            # print("action_mean2", action_mean)
-            # print("action_log_std", action_log_std)
-            # print("action_std",action_std)
+
         else:
             first_iter=int(x.shape[0]/env.pred_len)
 
@@ -247,13 +228,14 @@ class TrajectoryGenerator(nn.Module):
             state_reversed = model_input.view(original_shape)
             inter=state_reversed.permute(1,0,2)
             model_input = torch.cat((inter, env.pred_traj_gt_rel), dim=0)
-            action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 0, env.training_step)
+            action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 1, env.training_step)
             action_mean, action_log_std, action_std = torch.flatten(action_mean, 0,1), torch.flatten(action_log_std, 0,1),torch.flatten(action_std, 0,1)
 
         return normal_log_density(actions, action_mean, action_log_std, action_std)
     def select_action(self, obs_traj_rel, obs_traj_pos,  seq_start_end, training_step=3):
         if training_step == 1 or training_step == 2:
             action_mean, _, action_std = self.forward(obs_traj_rel, obs_traj_pos,  seq_start_end, 1,training_step)
+
         else:
             # print("obs_traj_rel",obs_traj_rel.shape)
             action_mean, _, action_std = self.forward(obs_traj_rel, obs_traj_pos,  seq_start_end,0, training_step)
@@ -283,28 +265,37 @@ class TrajectoryGenerator(nn.Module):
         Returns:
             _type_: _description_
         """
-
+        # print("self.fixed_noise", self.fixed_noise)
         if training_step==3:
+            self.obs_len=20
+            original_shape = (obs_traj_rel.shape[0],self.obs_len, 2)  
+            
             # print("forward obs_traj_rel", obs_traj_rel.shape)
-            state_reversed=obs_traj_rel
+            state_reversed = obs_traj_rel.view(original_shape)
+            inter=state_reversed.permute(1,0,2)
+            # print("inter", inter.shape)
+            state_reversed=inter #torch.Size([pred_len + obs_len, b, 2])
         else:
+            self.obs_len=16
             original_shape = (obs_traj_rel.shape[0],self.obs_len, 2)  
             state_reversed = obs_traj_rel.view(original_shape)
             state_reversed=state_reversed.permute(1,0,2) #added to match the framework input
         # state_reversed=obs_traj_rel
         
         batch = state_reversed.shape[1]
-        
-        # Causes stochasticity in output, not desired
+        # print("state_reversed" ,state_reversed.shape)
+        # print("seq_start_end", seq_start_end)
+        # print("batch", batch)
         traj_lstm_h_t, traj_lstm_c_t = self.init_hidden_traj_lstm(batch)
         graph_lstm_h_t, graph_lstm_c_t = self.init_hidden_graph_lstm(batch)
-
+        # print("traj_lstm_h_t", traj_lstm_h_t.shape)
+        # print("traj_lstm_c_t", traj_lstm_c_t.shape)
         pred_traj_rel = []
         traj_lstm_hidden_states = []
         graph_lstm_hidden_states = []
-        for i, input_t in enumerate(
-            state_reversed[: self.obs_len].chunk(
-                state_reversed[: self.obs_len].size(0), dim=0
+        for i, input_t in enumerate( #NOTE: CHANGED FROM sef.obs_len to 1
+            state_reversed[: 1].chunk(
+                state_reversed[: 1].size(0), dim=0
             )
         ):          
             # print("input_t", i,input_t.shape)
@@ -317,12 +308,11 @@ class TrajectoryGenerator(nn.Module):
             else:
                 traj_lstm_hidden_states += [traj_lstm_h_t]
         if training_step == 2:
-            # for i, tensor in enumerate(traj_lstm_hidden_states):
-                # print(f"Shape of tensor {i}:", tensor.cpu().detach().numpy().shape)
+
             graph_lstm_input = self.gatencoder(
                 torch.stack(traj_lstm_hidden_states), seq_start_end
             )
-            for i in range(self.obs_len):
+            for i in range(1): #NOTE:CHANGED FROM sef.obs_len to 1
                 graph_lstm_h_t, graph_lstm_c_t = self.graph_lstm_model(
                     graph_lstm_input[i], (graph_lstm_h_t, graph_lstm_c_t)
                 )
@@ -331,6 +321,7 @@ class TrajectoryGenerator(nn.Module):
                 )
                 output = self.traj_gat_hidden2pos(encoded_before_noise_hidden)
                 pred_traj_rel += [output]
+                # print("iterations")
         if training_step == 3:
             graph_lstm_input = self.gatencoder(
                 torch.stack(traj_lstm_hidden_states), seq_start_end
@@ -346,11 +337,10 @@ class TrajectoryGenerator(nn.Module):
                 graph_lstm_hidden_states += [graph_lstm_h_t]
         if training_step == 1 or training_step == 2:
             outputs= torch.stack(pred_traj_rel)
-            action_log_std = self.action_log_std.expand_as(outputs)
-            # print("self.fixed_noise", self.fixed_noise)
-            
-            action_std = torch.exp(action_log_std)
-            return outputs,  action_log_std, action_std
+            # print("outputs", outputs.shape) # torch.Size([16, b, 2])
+            output_squeezed = output.squeeze(0) 
+            prob = torch.sigmoid(output_squeezed)
+            return prob
         else:
             # print("traj_lstm_hidden_states",traj_lstm_hidden_states.shape, graph_lstm_hidden_states.shape)
             encoded_before_noise_hidden = torch.cat(
@@ -368,7 +358,7 @@ class TrajectoryGenerator(nn.Module):
                         state_reversed[-self.pred_len :].size(0), dim=0
                     )
                 ):
-                    teacher_force = 0.5< teacher_forcing_ratio #random.random() < teacher_forcing_ratio
+                    teacher_force = random.random() < teacher_forcing_ratio
                     input_t = input_t if teacher_force else output.unsqueeze(0)
                     pred_lstm_hidden, pred_lstm_c_t = self.pred_lstm_model(
                         input_t.squeeze(0), (pred_lstm_hidden, pred_lstm_c_t)
@@ -385,10 +375,10 @@ class TrajectoryGenerator(nn.Module):
                     pred_traj_rel += [output]
                 outputs = torch.stack(pred_traj_rel)
             # print("outputs",outputs.shape)
-
-            action_log_std = self.action_log_std.expand_as(outputs)
-            action_std = torch.exp(action_log_std)
-            return outputs, action_log_std, action_std
+            output_squeezed = output.view(-1,1) 
+            # print("output_squeezed",output_squeezed.shape)
+            prob = torch.sigmoid(output_squeezed)
+            return prob
 
 class Policy(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_size=(128, 128), activation='tanh', log_std=None):
@@ -510,33 +500,3 @@ class Discriminator(nn.Module):
         return prob
 
 
-class Value(nn.Module):
-    def __init__(self, state_dim, hidden_size=(128, 128), activation='tanh'):
-        super().__init__()
-        if activation == 'tanh':
-            self.activation = torch.tanh
-        elif activation == 'relu':
-            self.activation = torch.relu
-        elif activation == 'sigmoid':
-            self.activation = torch.sigmoid
-
-        # self.batch_norm = nn.BatchNorm1d(state_dim, affine=True)
-
-        self.affine_layers = nn.ModuleList()
-        last_dim = state_dim
-        for nh in hidden_size:
-            self.affine_layers.append(nn.Linear(last_dim, nh))
-            last_dim = nh
-
-        # last_dim = last_dim * 2  # added for shape fix
-        self.value_head = nn.Linear(last_dim, 1)
-        self.value_head.weight.data.mul_(0.1)
-        self.value_head.bias.data.mul_(0.0)
-
-    def forward(self, x):
-        # x = self.batch_norm(x)
-        for affine in self.affine_layers:
-            x = self.activation(affine(x))
-
-        value = self.value_head(x)
-        return value

@@ -61,6 +61,13 @@ class Policy(nn.Module):
 
     def get_log_prob(self, x, actions):
         action_mean, action_log_std, action_std = self.forward(x)
+        print("action_mean", action_mean)
+        print("action_log_std", action_log_std)
+        print("action_std",action_std)
+        # x.shape (bx12, 16)
+        # action_mean.shpae (bx12, 2)
+        # print("action_mean", action_mean.shape)
+        # print("\n action_mean: \n shape:", action_mean.shape, "\n values: ", action_mean)
         # print("\n action_mean: \n shape:", action_mean.shape, "\n values: ", action_mean)
         # print("\n action_log_std: \n shape:", action_log_std.shape, "\n values: ", action_log_std)
         # print("\n action_std: \n shape:", action_std.shape, "\n values: ", action_std)
@@ -109,7 +116,7 @@ class Discriminator(nn.Module):
         # x = torch.reshape(x, (x.shape[0], x.shape[1]*x.shape[2]))   # added for shape fix
         preprob = self.logic(x)
         prob = torch.sigmoid(preprob)
-        return prob
+        return prob # [b,1]
 
 
 class Value(nn.Module):

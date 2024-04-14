@@ -40,18 +40,24 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
 
         done = False
         if args.model== "stgat":
-            # print("USED TRAINING STEP",training_step)
             if training_step == 1 or training_step == 2:
-                # original_shape = (state.shape[0],8, 2)  
-                # state_reversed = state.view(original_shape)
-                # state_reversed=state_reversed.permute(1,0,2) #added to match the framework input
-                # print("Equivalent:", torch.equal(obs_traj_rel, state_reversed))
-                action_all, _, _ = policy(state, obs_traj,seq_start_end ,1, training_step)  
+                if mean_action:
+                    action_all, _, _ = policy(state, obs_traj,seq_start_end ,1, training_step) 
+                    
+                else:
+                    action_all = policy.select_action(state, obs_traj, seq_start_end , training_step)
+                    
+                    # print("action.shape", print_structure_and_dimensions(action_all))
             else: 
-                model_input = torch.cat((env.obs_traj_rel, env.pred_traj_gt_rel), dim=0)
-                action_all, _, _ = policy(model_input, obs_traj,seq_start_end ,0, training_step)
+                if mean_action:
+                    
+                    model_input = torch.cat((env.obs_traj_rel, env.pred_traj_gt_rel), dim=0)
+                    action_all, _, _ = policy(model_input, obs_traj,seq_start_end ,0, training_step)
+                else:
+                    model_input = torch.cat((env.obs_traj_rel, env.pred_traj_gt_rel), dim=0)
+                    action_all = policy.select_action(model_input, obs_traj, seq_start_end , training_step)
             iterator=iter(action_all)
-            # print("LENGHT",len(action_all))
+            # print("action_all",action_all.shape)
         while not done:
             if mean_action:
                 if args.trainable_noise == True:
@@ -60,10 +66,16 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                     action, _, _ = policy(state)                  # action is of shape (b, 2)
                 elif args.model== "stgat":
                     action=next(iterator)
-                    # print("SHAPE_state",state.shape)
-                    # print("SHAPE_action", action.shape)
             else:
-                action = policy.select_action(state)
+                if args.model== "original":
+                    action = policy.select_action(state)          
+                elif args.model== "stgat":
+                    action =next(iterator)
+                    # print("action.shape", action.shape)
+
+                    
+                    #I ENDED HERE
+                
             # save action
             # print("ACTION", action.shape)
             # print("STATES", state.shape)
@@ -72,28 +84,32 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
             states.append(state)
 
             next_state, reward, done, = env.step(state, action)
-
+            # print("Agent_reward", reward.shape) #should be torch.Size([b, 1])
             if custom_reward is not None:
                 if args.step_definition == 'multi':
                     gt = ground_truth[ts * bs:(ts + 1) * bs, :] # take the ground truth of the correct timestep
-                    reward = torch.squeeze(custom_reward(args, state, action, gt), dim=1)
+                    reward = torch.squeeze(custom_reward(env,args, state, action, gt), dim=1)
                     rewards.append(reward)
 
             if done:
-                action_full = torch.cat(actions, dim=1)
-
+                action_full = torch.cat(actions, dim=1) # (b, 24) or (b,16) in case of phase 1 and 2
+                
                 if custom_reward is not None:
                     if args.step_definition == 'single':
                         gt = ground_truth
                         # print("GT_agent", gt.shape)
-                        reward_full = torch.squeeze(custom_reward(args, state_0, action_full, gt), dim=1)
+                        reward_full = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
 
                 if args.step_definition == 'multi':
                     rewards = torch.cat(rewards, dim=0)  # (bx12,)
                 states = torch.cat(states, dim=0)        # (bx12, 16)
+                # print_structure_and_dimensions(actions)
+                # print("agent")
                 actions = torch.cat(actions, dim=0)      # (bx12, 2)
-                
+                # print_structure_and_dimensions(actions)
+                # print("agent")
                 # print("REWARDS", len(rewards), len(reward_full))
+                # print("memory", action_full.shape, actions.shape)
                 memory.push(state_0, action_full, reward_full, states, actions, rewards)   # initial state, 12dim action, reward (single), all intermediate states, all intermediate actions, rewards (multi)
                 break
 
@@ -104,9 +120,11 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
 
 def reshape_batch(batch):
     states = torch.stack(batch.state)
-    actions = torch.stack(batch.action, dim=0)
-    rewards = torch.stack(batch.reward, dim=0)
-
+    actions = torch.stack(batch.action, dim=0) # should be Tuple(torch.Size([b]))
+    # print("batch.reward")
+    # print_structure_and_dimensions(batch.reward)
+    rewards = torch.stack(batch.reward, dim=0) # should be torch.Size([1, b])
+    # print("reward",rewards.shape)
     states = torch.flatten(states.permute(1,0,2), 0, 1)
     actions = torch.flatten(actions.permute(1,0,2), 0, 1)
     rewards = torch.flatten(rewards.permute(1, 0))
@@ -142,7 +160,7 @@ class Agent:
         # memory.print_structure_and_dimensions(batch)
         # print("memory_structure")
         # memory.print_structure_and_dimensions(memory.memory)
-        # batch = reshape_batch(batch)
+        batch = reshape_batch(batch)
 
         return batch
 

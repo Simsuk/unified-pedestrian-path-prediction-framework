@@ -17,7 +17,7 @@ class Environment:
         self.path_counter = 0
         self.seq_start_end = None
         self.training_step=3
-
+        self.loss_mask= None
     def generate(self, batch_input):
 
         batch_input = [tensor.to(self.device) for tensor in batch_input]
@@ -32,7 +32,7 @@ class Environment:
         self.obs_traj_rel = obs_traj_rel
         self.pred_traj_gt_rel = pred_traj_gt_rel
         self.seq_start_end=seq_start_end
-
+        self.loss_mask=loss_mask
         self.obs_len = obs_traj.shape[0]
         self.pred_len = pred_traj_gt.shape[0]
         self.traj_len = self.obs_len + self.pred_len

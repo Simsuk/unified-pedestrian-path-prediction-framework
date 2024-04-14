@@ -81,7 +81,7 @@ def check_accuracy(env,args, loader, policy_net,  obs_len,pred_len, device, limi
                     fde, fde_l, fde_nl = cal_fde(
                         pred_traj_gt, pred_traj_fake, linear_ped, non_linear_ped
                     )
-            print("irl_loss_abs",irl_loss_abs.shape)
+            # print("irl_loss_abs",irl_loss_abs.shape)
             irl_losses_abs.append(irl_loss_abs.item())
             irl_losses_rel.append(irl_loss_rel.item())
             disp_error.append(ade.item())

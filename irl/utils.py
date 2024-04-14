@@ -89,7 +89,7 @@ def l2_loss(pred_traj, pred_traj_gt, loss_mask, random=0, mode="average"):
     Output:
     - loss: l2 loss depending on mode
     """
-    seq_len, batch, _ = pred_traj.size()
+    # seq_len, batch, _ = pred_traj.size()
     # equation below , the first part does noing, can be delete
     # print(pred_traj_gt.permute(1, 0, 2))
     loss = (pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)) ** 2
@@ -210,7 +210,22 @@ def relative_to_abs(rel_traj, start_pos):
     start_pos = torch.unsqueeze(start_pos, dim=1)
     abs_traj = displacement + start_pos
     return abs_traj.permute(1, 0, 2)
-
+def print_structure_and_dimensions(data, level=0):
+        indent = '  ' * level
+        if isinstance(data, tuple):
+            print(f"{indent}Tuple: Length {len(data)}")
+            for i, item in enumerate(data):
+                print(f"{indent}  Element {i}:")
+                print_structure_and_dimensions(item, level + 2)
+        elif isinstance(data, list):
+            print(f"{indent}List: Length {len(data)}")
+            for i, item in enumerate(data):
+                print(f"{indent}  Element {i}:")
+                print_structure_and_dimensions(item, level + 2)
+        elif isinstance(data, torch.Tensor):
+            print(f"{indent}Tensor: Shape {data.size()}")
+        else:
+            print(f"{indent}Unknown type: {type(data)}")
 
 def normal_entropy(std):
     var = std.pow(2)
@@ -220,12 +235,24 @@ def normal_entropy(std):
 
 
 def normal_log_density(x, mean, log_std, std):
+    """_summary_
+
+    Args:
+        x (tensor): shape ([bx12, 2]) or ([bx8, 2]) for STGAT first 2 phases
+        mean (tensor):  shape ([bx12, 2]) or ([bx8, 2]) for STGAT first 2 phases
+        log_std (tensor):  shape ([bx12, 2]) or ([bx8, 2]) for STGAT first 2 phases
+        std (tensor):  shape ([bx12, 2]) or ([bx8, 2]) for STGAT first 2 phases
+
+    Returns:
+        tensor: shape ([bx12, 2])
+    """
+    # print("x.shape, mean.shape", x.shape, mean.shape) # ([1480, 2])
     # Take the probability density function (normal distribution) and take the log of that, which can be expressed
     # as the equation below (checked). The log density tells us the likelihood of action X, given the mean and variance
     # we take the sum in dimension 1 because of x and y coordinate (sum of probs because log)
     var = std.pow(2)
     log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * math.log(2 * math.pi) - log_std
-    # print("\n log_density: \n shape:", log_density.shape, "\n values: ", log_density)
+    # print("\n log_density: \n shape:", log_density.shape, "\n values: ", log_density) #([8, 1480, 2]) for stgat and [4968, 2]) for original
     return log_density.sum(1, keepdim=True)
 
 
