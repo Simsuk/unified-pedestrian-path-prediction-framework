@@ -31,6 +31,7 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
         state_0 = state.clone()
         obs_traj=None
         bs = state.shape[0]             # batch size
+        # print("BATCH SIZE", bs)
         rewards = []
         states = []
         actions = []
@@ -45,7 +46,8 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                     action_all, _, _ = policy(state, obs_traj,seq_start_end ,1, training_step) 
                     
                 else:
-                    action_all = policy.select_action(state, obs_traj, seq_start_end , training_step)
+                    seed = time.time_ns()
+                    action_all = policy.select_action(state, obs_traj, seq_start_end , seed, training_step)
                     
                     # print("action.shape", print_structure_and_dimensions(action_all))
             else: 
@@ -55,7 +57,8 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                     action_all, _, _ = policy(model_input, obs_traj,seq_start_end ,0, training_step)
                 else:
                     model_input = torch.cat((env.obs_traj_rel, env.pred_traj_gt_rel), dim=0)
-                    action_all = policy.select_action(model_input, obs_traj, seq_start_end , training_step)
+                    seed = time.time_ns()
+                    action_all = policy.select_action(model_input, obs_traj, seq_start_end ,seed, training_step)
             iterator=iter(action_all)
             # print("action_all",action_all.shape)
         while not done:
@@ -79,7 +82,6 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
             # save action
             # print("ACTION", action.shape)
             # print("STATES", state.shape)
-            
             actions.append(action)
             states.append(state)
 
@@ -115,7 +117,6 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
 
             state = next_state
             ts = ts + 1
-
     return memory
 
 def reshape_batch(batch):

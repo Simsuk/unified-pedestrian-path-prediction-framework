@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 
-
 def get_noise(shape, noise_type):
     if noise_type == "gaussian":
         return torch.randn(*shape).cuda()
@@ -140,17 +139,31 @@ class TrajectoryGenerator(nn.Module):
         action_dim=2
     ):
         super(TrajectoryGenerator, self).__init__()
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
+        # torch.manual_seed(72)
+        # random.seed(72)
+        # np.random.seed(72)
+        # if torch.cuda.is_available():
+        #     torch.cuda.manual_seed_all(72)
+
         self.args=args
+        # torch.manual_seed(72)
         self.obs_len = obs_len
         self.pred_len = pred_len
+        # device = torch.device('cuda', index=self.args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
+        # self.action_log_std = (torch.ones(1, action_dim) * log_std).to(device)
         self.action_log_std = nn.Parameter(torch.ones(1, action_dim) * log_std)
+
              # existing initialization code
         self.noise_dim = noise_dim
         self.noise_type = noise_type
-
+        self.inter_states=None
         # Initialize the fixed part of the noise
-        self.fixed_noise = get_noise((1,) + self.noise_dim, self.noise_type)            
-
+        if self.args.pretraining==True:
+            self.fixed_noise = get_noise((1,) + self.noise_dim, self.noise_type)            
+        else:
+            self.register_buffer('fixed_noise', get_noise((1,) + self.noise_dim, self.noise_type))
         # self.pred_len = 1 if args.step_definition=="single" else pred_len
 
         self.gatencoder = GATEncoder(
@@ -184,7 +197,9 @@ class TrajectoryGenerator(nn.Module):
 
     def init_hidden_traj_lstm(self, batch):
         if self.args.randomness_definition=="stochastic":
-            torch.manual_seed(42)
+            # torch.manual_seed(self.args.seed)
+            pass
+            
         return (
             torch.randn(batch, self.traj_lstm_hidden_size).cuda(),
             torch.randn(batch, self.traj_lstm_hidden_size).cuda(),
@@ -192,7 +207,8 @@ class TrajectoryGenerator(nn.Module):
 
     def init_hidden_graph_lstm(self, batch):
         if self.args.randomness_definition=="stochastic":
-            torch.manual_seed(42)
+            # torch.manual_seed(self.args.seed)
+            pass
         return (
             torch.randn(batch, self.graph_lstm_hidden_size).cuda(),
             torch.randn(batch, self.graph_lstm_hidden_size).cuda(),
@@ -203,8 +219,7 @@ class TrajectoryGenerator(nn.Module):
         if self.args.randomness_definition=='deterministic':
             z_decoder = get_noise(noise_shape, self.noise_type)
         elif self.args.randomness_definition=='stochastic':
-                    # print("seq_start_end", seq_start_end)
-                    # print("self.fixed_noise", self.fixed_noise)
+
                     dynamic_noise_shape = [seq_start_end.size(0)] + [1] * (len(self.fixed_noise.shape) - 1)
                     z_decoder = self.fixed_noise.repeat(*dynamic_noise_shape)
         # Repeat the fixed noise for each element in the batch
@@ -222,7 +237,7 @@ class TrajectoryGenerator(nn.Module):
         if env.training_step == 1 or env.training_step == 2:
             # x.shape ([bx12,16])
             # actions_mean ([8, 185, 2]
-            # print("get_log_prob nput", x.shape)
+
             # print("actions.shape")
             first_iter=int(x.shape[0]/env.obs_len)
             # print("first_iter", first_iter)
@@ -230,15 +245,19 @@ class TrajectoryGenerator(nn.Module):
             # print("Weights of traj_hidden2pos layer:", self.traj_hidden2pos.weight.data)
             # print("Biases of traj_hidden2pos layer:", self.traj_hidden2pos.bias.data)
             action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 1, env.training_step)
-            action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 1, env.training_step)
+            # print("actions", actions[0][0])
+            # print("action_mean", action_mean[0][0])
+            # print("action_log_std", action_log_std[0][0])
+            # print("action_std",action_std[0][0])
             # print("env.seq_start_end", env.seq_start_end)
             
             # print("model_input", model_input[0])
+            # print(action_std)
             action_mean, action_log_std, action_std = torch.flatten(action_mean, 0,1), torch.flatten(action_log_std, 0,1),torch.flatten(action_std, 0,1)
             
-            # print("action_mean2", action_mean)
-            # print("action_log_std", action_log_std)
-            # print("action_std",action_std)
+            # print("action_mean", action_mean[0])
+            # print("action_log_std", action_log_std[0])
+            # print("action_std",action_std[0])
         else:
             first_iter=int(x.shape[0]/env.pred_len)
 
@@ -249,16 +268,21 @@ class TrajectoryGenerator(nn.Module):
             model_input = torch.cat((inter, env.pred_traj_gt_rel), dim=0)
             action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 0, env.training_step)
             action_mean, action_log_std, action_std = torch.flatten(action_mean, 0,1), torch.flatten(action_log_std, 0,1),torch.flatten(action_std, 0,1)
-
+            
         return normal_log_density(actions, action_mean, action_log_std, action_std)
-    def select_action(self, obs_traj_rel, obs_traj_pos,  seq_start_end, training_step=3):
+    def select_action(self, obs_traj_rel, obs_traj_pos,  seq_start_end,seed, training_step=3):
         if training_step == 1 or training_step == 2:
             action_mean, _, action_std = self.forward(obs_traj_rel, obs_traj_pos,  seq_start_end, 1,training_step)
         else:
             # print("obs_traj_rel",obs_traj_rel.shape)
             action_mean, _, action_std = self.forward(obs_traj_rel, obs_traj_pos,  seq_start_end,0, training_step)
+            # print(action_mean[0][0])
+        # torch.manual_seed(seed)   
+        # print(action_mean[0][0])   
         action = torch.normal(action_mean, action_std)
-        
+        # torch.manual_seed(self.args.seed)   
+        # print("action",action[0][0])
+
         return action
     def forward(
         self,
@@ -283,11 +307,12 @@ class TrajectoryGenerator(nn.Module):
         Returns:
             _type_: _description_
         """
-
-        if training_step==3:
+        # print("pretraining", self.args.pretraining)
+        if (training_step==3 or self.args.pretraining==True):
             # print("forward obs_traj_rel", obs_traj_rel.shape)
             state_reversed=obs_traj_rel
         else:
+            print("mistake")
             original_shape = (obs_traj_rel.shape[0],self.obs_len, 2)  
             state_reversed = obs_traj_rel.view(original_shape)
             state_reversed=state_reversed.permute(1,0,2) #added to match the framework input
@@ -356,9 +381,11 @@ class TrajectoryGenerator(nn.Module):
             encoded_before_noise_hidden = torch.cat(
                 (traj_lstm_hidden_states[-1], graph_lstm_hidden_states[-1]), dim=1
             )
+            self.inter_states=encoded_before_noise_hidden
             pred_lstm_hidden = self.add_noise(
                 encoded_before_noise_hidden, seq_start_end
             )
+            # print("encoded_before_noise_hidden", encoded_before_noise_hidden[0][0])
             pred_lstm_c_t = torch.zeros_like(pred_lstm_hidden).cuda()
             output = state_reversed[self.obs_len-1]
             if self.training:
@@ -368,7 +395,7 @@ class TrajectoryGenerator(nn.Module):
                         state_reversed[-self.pred_len :].size(0), dim=0
                     )
                 ):
-                    teacher_force = 0.5< teacher_forcing_ratio #random.random() < teacher_forcing_ratio
+                    teacher_force = random.random() < teacher_forcing_ratio
                     input_t = input_t if teacher_force else output.unsqueeze(0)
                     pred_lstm_hidden, pred_lstm_c_t = self.pred_lstm_model(
                         input_t.squeeze(0), (pred_lstm_hidden, pred_lstm_c_t)

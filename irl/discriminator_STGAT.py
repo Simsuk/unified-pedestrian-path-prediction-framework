@@ -147,7 +147,7 @@ class STGAT_discriminator(nn.Module):
              # existing initialization code
         self.noise_dim = noise_dim
         self.noise_type = noise_type
-
+        torch.manual_seed(42)
         # Initialize the fixed part of the noise
         self.fixed_noise = get_noise((1,) + self.noise_dim, self.noise_type)            
 
@@ -183,12 +183,16 @@ class STGAT_discriminator(nn.Module):
         )
 
     def init_hidden_traj_lstm(self, batch):
+        if self.args.randomness_definition=="stochastic":
+            torch.manual_seed(42)
         return (
             torch.randn(batch, self.traj_lstm_hidden_size).cuda(),
             torch.randn(batch, self.traj_lstm_hidden_size).cuda(),
         )
 
     def init_hidden_graph_lstm(self, batch):
+        if self.args.randomness_definition=="stochastic":
+            torch.manual_seed(42)
         return (
             torch.randn(batch, self.graph_lstm_hidden_size).cuda(),
             torch.randn(batch, self.graph_lstm_hidden_size).cuda(),
@@ -461,42 +465,36 @@ class Policy(nn.Module):
         return cov_inv.detach(), mean, {'std_id': std_id, 'std_index': std_index}
 
 
-class Discriminator(nn.Module):
-    """_summary_
-
-        Input:
-            generated/policy trajectories or expert trajectorie:  tate_actions torch.Size([b, 40])
-        Output:
-            probabilities e_o or g_o with shape torch.Size([b, 1])
-    """
-    def __init__(self, num_inputs, hidden_size=(128, 128), activation='relu'):
+class Discriminator_LSTM(nn.Module):
+    def __init__(self, hidden_size=128, lstm_hidden_size=64, activation='relu'):
         super().__init__()
-        if activation == 'tanh':
-            self.activation = torch.tanh
-        elif activation == 'relu':
-            self.activation = torch.nn.ReLU(inplace=False)
-        elif activation == 'sigmoid':
-            self.activation = torch.sigmoid
+        # LSTM layer
+        self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_hidden_size, batch_first=True)
 
-        self.affine_layers = nn.ModuleList()
-        last_dim = num_inputs
-        for nh in hidden_size:
-            self.affine_layers.append(nn.Linear(last_dim, nh))
-            last_dim = nh
+        # Global average pooling
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
 
-        # last_dim = last_dim * 2                 # added for shape fix
-        self.logic = nn.Linear(last_dim, 1)
-        self.logic.weight.data.mul_(0.1)
-        self.logic.bias.data.mul_(0.0)
+        # Define activation function
+        self.activation = {
+            'tanh': torch.tanh,
+            'relu': nn.ReLU(inplace=False),
+            'sigmoid': torch.sigmoid
+        }.get(activation, nn.ReLU(inplace=False))  # Default to ReLU if unspecified
+
+        # Linear layer for final decision
+        self.logic = nn.Linear(lstm_hidden_size, 1)
 
     def forward(self, x):
-        # print("Discriminator Input", x.shape)
-        for affine in self.affine_layers:
-            
-            x = self.activation(affine(x))
-        # x = torch.reshape(x, (x.shape[0], x.shape[1]*x.shape[2]))   # added for shape fix
-        preprob = self.logic(x)
-        prob = torch.sigmoid(preprob)
-        return prob
+        # LSTM expects (batch, seq_len, features) but each feature is treated as a sequence
+        x = x.unsqueeze(-1)  # Shape: (batch_size, num_features, 1)
+        x, _ = self.lstm(x)
 
+        # Apply global average pooling across the sequence dimension
+        x = x.transpose(1, 2)  # Shape: (batch_size, 1, num_features)
+        x = self.global_avg_pool(x).squeeze(-1)  # Shape: (batch_size, lstm_hidden_size)
+
+        x = self.activation(x)
+        x = self.logic(x)
+        prob = torch.sigmoid(x)
+        return prob
 

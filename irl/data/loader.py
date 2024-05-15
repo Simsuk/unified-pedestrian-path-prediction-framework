@@ -4,6 +4,7 @@ from irl.data.trajectories import TrajectoryDataset, seq_collate
 
 
 def data_loader(args, path, mid_pad=1):
+    print(args.pred_len,path )
     dset = TrajectoryDataset(
         path,
         obs_len=args.obs_len,

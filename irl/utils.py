@@ -92,6 +92,7 @@ def l2_loss(pred_traj, pred_traj_gt, loss_mask, random=0, mode="average"):
     # seq_len, batch, _ = pred_traj.size()
     # equation below , the first part does noing, can be delete
     # print(pred_traj_gt.permute(1, 0, 2))
+    # print(pred_traj.permute(1, 0, 2))
     loss = (pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)) ** 2
     if mode == "sum":
         return torch.sum(loss)
@@ -251,8 +252,10 @@ def normal_log_density(x, mean, log_std, std):
     # as the equation below (checked). The log density tells us the likelihood of action X, given the mean and variance
     # we take the sum in dimension 1 because of x and y coordinate (sum of probs because log)
     var = std.pow(2)
-    log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * math.log(2 * math.pi) - log_std
-    # print("\n log_density: \n shape:", log_density.shape, "\n values: ", log_density) #([8, 1480, 2]) for stgat and [4968, 2]) for original
+    # print("log_std", log_std[0])
+    # print("(x - mean)", (x - mean)[0])
+    log_density = -(x - mean).pow(2) / (2.0 * var) - 0.5 * math.log(2 * math.pi) - log_std
+    # print("log_density",log_density[0])
     return log_density.sum(1, keepdim=True)
 
 

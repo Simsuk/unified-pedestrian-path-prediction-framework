@@ -22,10 +22,12 @@ def create_fake_trajectories(env,args,obs_traj_rel,pred_traj_gt_rel, policy,obs_
         fake_traj = torch.reshape(fake_traj, (fake_traj.shape[0], pred_len, 2))  # (b, 12, 2)
         pred_traj_fake_rel = fake_traj.permute(1, 0, 2)  # (12, b, 2)
     elif args.model=="stgat":
+        if env.training_step==3:
             # happens only in training_step==3 because only then we generate 12 trajectories
             model_input=torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
             pred_traj_fake_rel, _, _ = policy(model_input, obs_traj_rel,seq_start_end ,0, env.training_step)         # (12, b, 2)
-
+        elif env.training_step==1 or env.training_step==2:
+            pred_traj_fake_rel, _, _ = policy(state, obs_traj_rel,seq_start_end ,1, env.training_step)    
                         
 
     return pred_traj_fake_rel   # (12, b, 2) or (8,b,2) if stgat in phase 1 and 2
@@ -81,6 +83,20 @@ def check_accuracy(env,args, loader, policy_net,  obs_len,pred_len, device, limi
                     fde, fde_l, fde_nl = cal_fde(
                         pred_traj_gt, pred_traj_fake, linear_ped, non_linear_ped
                     )
+                elif env.training_step==1 or env.training_step==2:
+                    pred_traj_fake = relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
+
+                    irl_loss_abs, irl_loss_rel = cal_l2_losses(
+                        obs_traj, obs_traj_rel, pred_traj_fake,
+                        pred_traj_fake_rel, loss_mask=None, mode="sum"
+                    )
+                    ade, ade_l, ade_nl = cal_ade(
+                        obs_traj, pred_traj_fake, linear_ped, non_linear_ped
+                    )
+
+                    fde, fde_l, fde_nl = cal_fde(
+                        obs_traj, pred_traj_fake, linear_ped, non_linear_ped
+                    )       
             # print("irl_loss_abs",irl_loss_abs.shape)
             irl_losses_abs.append(irl_loss_abs.item())
             irl_losses_rel.append(irl_loss_rel.item())

@@ -3,15 +3,19 @@ import math
 from torch.nn import BCELoss
 
 BCE_loss = BCELoss()
+
+
+
 import random
 from irl.utils import *
 from irl.advantages import calculate_return
 import torch.nn.functional as F
+import multiprocessing
 from irl.utils import (
     l2_loss
 
 )
-
+# global log_probs_scene
 def add_noise_to_states(states):
     noise_dim = 2
     noise_std = 0.05
@@ -26,31 +30,56 @@ def add_noise_to_states(states):
 
     noisy_states = states + noise
     return noisy_states
-
+# Example usage
+def process_task(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train):
+        output = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
+        return output.cpu()
 
 def discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train):
     if args.model=='original':
         
         g_o = discriminator_net(pred_state_actions)
         e_o = discriminator_net(expert_state_actions)
+
     elif args.model=='stgat':
         if env.training_step == 1 or env.training_step == 2:
             first_16 = expert_state_actions[:, :16]
             expert_state_actions=torch.cat([first_16, first_16], dim=1) 
-            g_o = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)  # generated/policy scores
-            e_o = discriminator_net(expert_state_actions,obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)  # expert scores
+            # multiprocessing.set_start_method('spawn', force=True)
+            # tasks = [
+            #     (pred_state_actions, args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train),
+            #     (expert_state_actions, args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train)
+            # ]
+
+            # # Create a pool of processes and execute tasks
+            # with multiprocessing.Pool(processes=2) as pool:
+            #     results = pool.starmap(process_task, tasks)
+            
+            # g_o, e_o = results
+            if args.disc_type=='original':
+                g_o = discriminator_net(pred_state_actions)
+                e_o = discriminator_net(expert_state_actions)
+            else:
+                g_o = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)  # generated/policy scores
+                e_o = discriminator_net(expert_state_actions,obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)  # expert scores
         else:
-            g_o = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # generated/policy scores
-            e_o = discriminator_net(expert_state_actions, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # expert scores
+                if args.disc_type=='original':
+                    g_o = discriminator_net(pred_state_actions)
+                    e_o = discriminator_net(expert_state_actions)
+                else:
+                    # print("end=env.seq_start_end",env.seq_start_end[-1])
+                    # print("pred_state_actions", pred_state_actions.shape)
+                    g_o = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # generated/policy scores
+                    e_o = discriminator_net(expert_state_actions, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # expert scores
     # g_o.shape=torch.Size([706, 1])
     
 
     g_o_l = torch.zeros((pred_state_actions.shape[0], 1), device=device)
+    # print("pred_state_actions", pred_state_actions[0][0])
     e_o_l = torch.ones((expert_state_actions.shape[0], 1), device=device)
     d_loss_policy = discriminator_crt(g_o, g_o_l)  # fake
     d_loss_expert = discriminator_crt(e_o, e_o_l)  # real
     discrim_loss = d_loss_policy + d_loss_expert
-
     discriminator_opt.zero_grad()
 
     if train:
@@ -61,6 +90,7 @@ def discriminator_step(args,env, discriminator_net, discriminator_opt, discrimin
     d_loss_policy=d_loss_policy.detach()
     d_loss_expert=d_loss_expert.detach()
     discrim_loss=discrim_loss.detach()
+    # print("discrim_loss",discrim_loss)
     return discrim_loss
 
 def value_step(states, returns, value_net, value_crt):
@@ -71,11 +101,11 @@ def value_step(states, returns, value_net, value_crt):
     return value_loss
 
 
-def ppo_step(states, states_v, actions, returns, advantages, fixed_log_probs, policy_net, value_net, optimizer_policy, optimizer_value, train, args):
+def ppo_step(states, states_v, actions, returns, advantages, fixed_log_probs, policy_net, value_net, optimizer_policy, optimizer_value, train, args, env):
 
     # for now assuming epochs and minibatches are 1
-    optim_value_iternum = 1
-    l2_reg = 0
+    optim_value_iternum = args.optim_value_iternum #1
+    l2_reg = args.l2_reg #0
     clip_epsilon = args.ppo_clip
 
     for _ in range(args.ppo_iterations):
@@ -94,7 +124,10 @@ def ppo_step(states, states_v, actions, returns, advantages, fixed_log_probs, po
                 optimizer_value.step()
 
         """update policy"""
-        log_probs = policy_net.get_log_prob(states, actions).squeeze()
+        if args.model=='original':
+            log_probs = policy_net.get_log_prob(states, actions).squeeze()
+        else:
+           log_probs = policy_net.get_log_prob(states, actions, env,obs_traj_pos=None)
         if args.step_definition == 'single':
             pred_len = args.pred_len
             batchsize = math.ceil(states.shape[0] / pred_len)
@@ -128,6 +161,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
         batchsize = math.ceil(states.shape[0] / pred_len)  
     elif args.model=="stgat" and training_step==3:
         batchsize = math.ceil(states.shape[0] / pred_len)
+        # print("BATCHSIZE", batchsize)
     elif args.model=="stgat" and (training_step==1 or training_step==2):
         batchsize = math.ceil(states.shape[0] / obs_len)
     value_loss = 0
@@ -143,7 +177,8 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 # print("states", states)
                 # print("Weights of traj_hidden2pos layer:", policy_net.traj_hidden2pos.weight.data)
                 # print("Biases of traj_hidden2pos layer:", policy_net.traj_hidden2pos.bias.data)
-                actions_mean, _, _ = policy_net(states[0:batchsize], obs_traj,env.seq_start_end ,1, training_step)  
+                actions_mean, _, _ = policy_net(states[0:batchsize], obs_traj,env.seq_start_end ,1, training_step)
+                
             else: 
                 state_reversed=states[0:batchsize]
                 # print("state_reversed",state_reversed.shape)
@@ -172,10 +207,11 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 log_probs_reshaped = torch.reshape(log_probs, (obs_len, batchsize)).T      # transpose / dim=0? same but doenst look logically shape=([b,12])
             else:
                 log_probs_reshaped = torch.reshape(log_probs, (pred_len, batchsize)).T    #(b,12)
-
             log_probs_sum = log_probs_reshaped.sum(dim=1)                               # (b)
             log_probs = log_probs_sum
             returns = rewards
+            
+            
             ###################
             # STGAT LOSS PER SCENE 
             ##################
@@ -208,10 +244,9 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                     _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
                     #_l2_loss_rel.shape[scene_trajectories,1]
                     _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
-                    _l2_loss_rel = torch.min(_l2_loss_rel) / (
-                        (pred_traj_fake_rel.shape[0]) * (end - start)
-                    )                       # average per pedestrian per scene
-                    # policy_loss += _l2_loss_rel# delete this
+                    # _l2_loss_rel = torch.min(_l2_loss_rel) / (
+                    #     (pred_traj_fake_rel.shape[0]) * (end - start)
+                    # )                       # average per pedestrian per scene
                     _log_probs_sum= torch.narrow(log_probs_sum, 0, start, end - start)
                     _log_probs_scene=torch.sum(_log_probs_sum, dim=0)
                     log_probs_scene.append(_log_probs_scene) #torch.cat((log_probs_scene, _log_probs_scene), 0)
@@ -228,7 +263,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 original_shape = (states_part.shape[0],8, 2)  
                 state_reversed = states_part.view(original_shape)
                 state_reversed=state_reversed.permute(1,0,2)
-                l2_loss_rel.append(-l2_loss(state_reversed, actions_mean, loss_mask, mode="raw")
+                l2_loss_rel.append(l2_loss(state_reversed, actions_mean, loss_mask, mode="raw")
                 )
                 scene_loss= [] #torch.empty(0).to(states_part)
                 log_probs_scene= [] #torch.empty(0).to(states_part)
@@ -241,14 +276,14 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                     
                     # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
                     _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
-                    # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
-                    _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
+                    # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,best_k]
+                    _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [best_k]
                     _l2_loss_rel = torch.min(_l2_loss_rel) / (
                         (pred_traj_fake_rel.shape[0]) * (end - start)
                     )                       # average per pedestrian per scene
-                    # print("_l2_loss_rel", _l2_loss_rel)
-                    policy_loss += _l2_loss_rel
+                    # print("pred_traj_fake_rel", pred_traj_fake_rel.shape)
                     _log_probs_sum= torch.narrow(log_probs_sum, 0, start, end - start)
+                    # print(_log_probs_sum)
                     _log_probs_scene=torch.sum(_log_probs_sum, dim=0)
                     log_probs_scene.append(_log_probs_scene)#torch.cat((log_probs_scene, _log_probs_scene), 0)
 
@@ -269,17 +304,27 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
         if args.training_algorithm == 'baseline':
             # do reinforce with baseline stuff
             with torch.no_grad():
-                values = value_net(states_v).squeeze()
-            advantages = returns - values
+                if args.scene_value_net==True:
+                    inter = policy_net.inter_states.detach()
+                    values = value_net(inter).squeeze()
+                else:
+                    values = value_net(states_v).squeeze()
+            returns_value = returns #l2_loss_rel.squeeze().detach()
+            advantages = returns_value - values
             advantages = (advantages - advantages.mean()) / advantages.std() # normalize advantages according to ppo
             policy_loss = -(advantages * log_probs).mean()
         elif (args.training_algorithm == 'ppo' or args.training_algorithm == 'ppo_only'):
             with torch.no_grad():
-                values = value_net(states_v).squeeze()
+                if args.scene_value_net==True:
+                    inter = policy_net.inter_states.detach()
+                    values = value_net(inter).squeeze()
+                else:
+                    values = value_net(states_v).squeeze()
             fixed_log_probs = log_probs.detach()
-            advantages = returns - values
+            returns_value = returns #l2_loss_rel.squeeze().detach()
+            advantages = returns_value - values
             advantages = (advantages - advantages.mean()) / advantages.std() # normalize advantages according to ppo
-            policy_loss, value_loss = ppo_step(states, states_v, actions_all[0], returns, advantages, fixed_log_probs, policy_net, value_net, optimizer_policy, optimizer_value, train, args)
+            policy_loss, value_loss = ppo_step(states, states_v, actions_all[0], returns, advantages, fixed_log_probs, policy_net, value_net, optimizer_policy, optimizer_value, train, args, env)
 
         else:
 
@@ -289,7 +334,22 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
             elif args.model=="stgat":
                 log_probs_scene=torch.stack(log_probs_scene)
                 scene_loss=torch.stack(scene_loss).detach()
-                policy_loss=-(scene_loss*log_probs_scene).mean()
+                # print("log_probs_scene", log_probs_scene[0])
+                # lambda_ = 100  # Regularization strength; this is a hyperparameter you can tune
+
+                # # Calculate L2 norm squared of all parameters
+                # l2_norm = sum(p.pow(2.0).sum() for p in policy_net.parameters())
+
+                # # Regularization term
+                # l2_reg = lambda_ * l2_norm
+
+                # # Original loss
+                # policy_loss = (scene_loss * log_probs_scene).mean()
+
+                # # Total loss with regularization
+                # policy_loss = policy_loss + l2_reg
+                policy_loss= (l2_loss_rel*log_probs_sum).mean() # (l2_loss_rel*log_probs_sum).mean()  #(scene_loss*log_probs_scene).mean()  # (l2_loss_rel*log_probs_sum).mean()  (scene_loss*log_probs_scene).mean()
+                # print("LOSS", policy_loss)
         if args.model=="stgat":
             returns=returns.detach()
     elif args.randomness_definition == 'deterministic':
@@ -317,71 +377,110 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 inter=state_reversed.permute(1,0,2)
                 model_input = torch.cat((inter, env.pred_traj_gt_rel), dim=0)
                 # print("shapes", inter.shape, env.pred_traj_gt_rel.shape)
+
+                ##########################
+
                 l2_loss_rel=[]
                 for _ in range(args.best_k):
-                    
-                    actions_mean, _, _ = policy_net(model_input, obs_traj,env.seq_start_end ,0, training_step)
-                    pred_traj_fake_rel = torch.reshape(actions_mean, (pred_len, batchsize, 2))
+                    if args.loss_definition=="discriminator":
+                        actions_mean, _, _ = policy_net(model_input, obs_traj,env.seq_start_end ,0, training_step)
+                        actions_part = torch.reshape(actions_mean, (pred_len, batchsize, 2))  # reshape from (bx12, 2) to (12, b, 2)
+                        actions_part = actions_part.permute(1, 0, 2).flatten(1, 2)
+                        rewards = custom_reward(env,args, states_part, actions_part, gt)  # (610, 1) =(b,1)            
+                        policy_loss_batch = -rewards
+                        l2_loss_rel.append(policy_loss_batch)
+                        # policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
+                        # # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                        l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
+                        # for start, end in env.seq_start_end.data:
+                        #     # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                        #     _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
+                        #     # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
+                        #     _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
+                        #     # _l2_loss_rel = torch.min(_l2_loss_rel) / (
+                        #     # (end - start)
+                        #     # )                       # average per pedestrian per scene
+                        #     policy_loss += _l2_loss_rel.squeeze()
+                        policy_loss= policy_loss_batch.mean() #policy_loss/(len(env.seq_start_end.data)-1)     
                     # actions_mean (12,b,2)
                     # pred_traj_fake_rel (12,b,2)
                     # states_part (b,16)
                     # gt (b,40)
                     # FORMERLY KNOWN AS actions_part
-                    # print("actions_part", actions_part.shape)
-                    # print("states_part", states_part.shape)
-                    # print("env.pred_traj_gt_rel", env.pred_traj_gt_rel.shape)
-                    # print("gt", gt.shape)                
-                    
-                    # print("actions_part", actions_part.shape)
-                    # print("states_part", states_part.shape)
-                    loss_mask=env.loss_mask[:, args.obs_len :]
-                    original_shape = (states_part.shape[0],8, 2)  
-                    state_reversed = states_part.view(original_shape)
-                    state_reversed=state_reversed.permute(1,0,2)
-                    l2_loss_rel.append(
-                    l2_loss(actions_mean,  env.pred_traj_gt_rel, loss_mask, mode="raw")
-                    )
-                policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
-                # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
-                l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
-                for start, end in env.seq_start_end.data:
-                    # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
-                    _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
-                    # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
-                    _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
-                    _l2_loss_rel = torch.min(_l2_loss_rel) / (
-                        (pred_traj_fake_rel.shape[0]) * (end - start)
-                    )                       # average per pedestrian per scene
-                    policy_loss += _l2_loss_rel
+                    else:
+                        actions_mean, _, _ = policy_net(model_input, obs_traj,env.seq_start_end ,0, training_step)
+                        pred_traj_fake_rel = torch.reshape(actions_mean, (pred_len, batchsize, 2))
+                        loss_mask=env.loss_mask[:, args.obs_len :]
+                        original_shape = (states_part.shape[0],8, 2)  
+                        state_reversed = states_part.view(original_shape)
+                        state_reversed=state_reversed.permute(1,0,2)
+                        l2_loss_rel.append(
+                        l2_loss(actions_mean,  env.pred_traj_gt_rel, loss_mask, mode="raw")
+                        )
+                        policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
+                        # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                        l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
+                        # for start, end in env.seq_start_end.data:
+                        #     # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                        #     _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
+                        #     # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
+                        #     _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
+                        #     _l2_loss_rel = torch.min(_l2_loss_rel) / (
+                        #         (pred_traj_fake_rel.shape[0]) * (end - start)
+                        #     )                       # average per pedestrian per scene
+                        #     policy_loss += _l2_loss_rel
+                        policy_loss=l2_loss_rel.mean()
             elif args.model=="stgat" and (training_step==1 or training_step==2):
                 l2_loss_rel=[]
+                actions_mean, _, _ = policy_net(states[0:batchsize], obs_traj,env.seq_start_end ,1, training_step)  
+                actions_part = torch.reshape(actions_mean, (obs_len, batchsize, 2))  # reshape from (bx8, 2) to (8, b, 2)
+                actions_part = actions_part.permute(1, 0, 2).flatten(1, 2)
                 for _ in range(args.best_k):
-                    print("MODEL INPUT")
-                    actions_mean, _, _ = policy_net(states[0:batchsize], obs_traj,env.seq_start_end ,1, training_step)  
-                    pred_traj_fake_rel = torch.reshape(actions_mean, (obs_len, batchsize, 2))
-                    
-                    loss_mask=env.loss_mask[:, args.obs_len :]
-                    # if training_step == 1 or training_step == 2:
-                    original_shape = (states_part.shape[0],8, 2)  
-                    state_reversed = states_part.view(original_shape)
-                    state_reversed=state_reversed.permute(1,0,2)
-                    l2_loss_rel.append(
-                    l2_loss(state_reversed, actions_mean, loss_mask, mode="raw")
-                    )
-                policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
-                # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
-                l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
-                for start, end in env.seq_start_end.data:
-                    # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
-                    _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
-                    # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
-                    _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
-                    _l2_loss_rel = torch.min(_l2_loss_rel) / (
-                        (pred_traj_fake_rel.shape[0]) * (end - start)
-                    )                       # average per pedestrian per scene
-                    
-                    policy_loss += _l2_loss_rel
-            
+                    # print("MODEL INPUT")
+                    if args.loss_definition=="discriminator":
+                        rewards = custom_reward(env,args, states_part, actions_part, gt)  # (610, 1) =(b,1)            
+                        policy_loss_batch = -rewards
+                        l2_loss_rel.append(policy_loss_batch)
+                        policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
+                        # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                        l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
+                        for start, end in env.seq_start_end.data:
+                            # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                            _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
+                            # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
+                            _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
+                            # _l2_loss_rel = torch.min(_l2_loss_rel) / (
+                            #     (pred_traj_fake_rel.shape[0]) * (end - start)
+                            # )                       # average per pedestrian per scene
+                            
+                            policy_loss += _l2_loss_rel.squeeze()
+                        # policy_loss=policy_loss/(len(env.seq_start_end.data)-1)
+                        policy_loss=policy_loss_batch.mean()
+                    else:
+                        actions_mean, _, _ = policy_net(states[0:batchsize], obs_traj,env.seq_start_end ,1, training_step)  
+                        pred_traj_fake_rel = torch.reshape(actions_mean, (obs_len, batchsize, 2))
+                        loss_mask=env.loss_mask[:, args.obs_len :]
+                        # if training_step == 1 or training_step == 2:
+                        original_shape = (states_part.shape[0],8, 2)  
+                        state_reversed = states_part.view(original_shape)
+                        state_reversed=state_reversed.permute(1,0,2)
+                        l2_loss_rel.append(
+                        l2_loss(state_reversed, actions_mean, loss_mask, mode="raw")
+                        )
+                        policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
+                        # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                        l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
+                        for start, end in env.seq_start_end.data:
+                            # print("l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
+                            _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
+                            # print("_l2_loss_rel", _l2_loss_rel.shape) # [scene_trajectories,1]
+                            _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
+                            _l2_loss_rel = torch.min(_l2_loss_rel) / (
+                                (pred_traj_fake_rel.shape[0]) * (end - start)
+                            )                       # average per pedestrian per scene
+                            
+                            policy_loss += _l2_loss_rel
+
             # OLD CODE ################
             # NOTE: pred_traj_fake_rel is actions_part
             # actions_part = actions_part.permute(1, 0, 2).flatten(1, 2)  # reorder from (12, b, 2) to (b, 24)
@@ -390,10 +489,26 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
             # policy_loss = -rewards.mean()  # tensor(float)
             ###########################
         elif args.step_definition == 'multi':
-            rewards = custom_reward(args, states, actions_mean, gt)  # (bx12, 1)
-            returns = calculate_return(rewards, pred_len, batchsize, gamma=args.discount_factor)
-            policy_loss = -returns.mean()  # tensor(float)
-            
+            if args.model=='original':
+                actions_mean, _, _ = policy_net(states) 
+                # print(args)
+                rewards = custom_reward(env,args, states, actions_mean, gt)  # (bx12, 1)
+                returns = calculate_return(rewards, pred_len, batchsize, gamma=args.discount_factor)
+                policy_loss = -returns.mean()  # tensor(float)
+            elif args.model=='stgat':
+                actions_mean, _, _ = policy_net(model_input, obs_traj,env.seq_start_end ,0, training_step)
+                pred_traj_fake_rel = torch.reshape(actions_mean, (pred_len, batchsize, 2))
+                loss_mask=env.loss_mask[:, args.obs_len :]
+                original_shape = (states_part.shape[0],8, 2)  
+                state_reversed = states_part.view(original_shape)
+                state_reversed=state_reversed.permute(1,0,2)
+                l2_loss_rel.append(
+                l2_loss(actions_mean,  env.pred_traj_gt_rel, loss_mask, mode="raw")
+                )
+                policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
+                l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
+
+                policy_loss=l2_loss_rel.mean()            
     optimizer_policy.zero_grad()
 
 
@@ -402,23 +517,47 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
             return policy_loss, value_loss   # change to something usefull, but avoid policy_loss backward/update
         if args.training_algorithm == 'baseline':
             optimizer_value.zero_grad()
-            value_loss = value_step(states_v, returns, value_net, value_crt)
+            returns_value=rewards #l2_loss_rel.squeeze().detach()
+            if args.scene_value_net==True:
+                inter = policy_net.inter_states.detach()
+                value_loss = value_step(inter, returns_value, value_net, value_crt)
+            else:
+                value_loss = value_step(states_v, returns_value, value_net, value_crt)
             for param in value_net.parameters():
                 value_loss += param.pow(2).sum() * 0
             value_loss.backward()
+            
             optimizer_value.step()
-        # policy_loss=-policy_loss
-        print("policy_loss", policy_loss)
+            # lambda_ = 100  # Regularization strength; this is a hyperparameter you can tune
+
+            # # Calculate L2 norm squared of all parameters
+            # l2_norm = sum(p.pow(2.0).sum() for p in policy_net.parameters())
+
+            # # Regularization term
+            # l2_reg = lambda_ * l2_norm
+
+            # # Original loss
+            # policy_loss = (scene_loss * log_probs_scene).mean()
+
+            # # Total loss with regularization
+            # policy_loss = policy_loss + l2_reg
+        # print("policy_loss", policy_loss)
+        # torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=0.2)
+        
+        # policy_loss=l2_loss_rel.mean()
+        # print("policy_loss2", policy_loss2)
+        # print("policy_loss", policy_loss)
         policy_loss.backward()
         optimizer_policy.step()
     if args.model=="stgat":
         # returns=returns.detach()
         rewards=rewards.detach()
         l2_loss_rel=l2_loss_rel.detach()
-        _l2_loss_rel=_l2_loss_rel.detach()
+        # _l2_loss_rel=_l2_loss_rel.detach()
         policy_loss=policy_loss.detach()
         actions_mean=actions_mean.detach()
-        pred_traj_fake_rel=pred_traj_fake_rel.detach()
+        if args.loss_definition!="discriminator":
+            pred_traj_fake_rel=pred_traj_fake_rel.detach()
     # print("acion_mean", actions_mean)
     return policy_loss, value_loss
 

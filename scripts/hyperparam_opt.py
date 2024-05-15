@@ -3,14 +3,18 @@ import argparse
 import os
 import random
 from memory_profiler import profile
+from functools import partial
 import cProfile
 import re
+# from optuna.integration.tensorboard import TensorBoardCallback
+
 import pstats
 from cProfile import Profile
 from pstats import SortKey, Stats
 import logging
 import gc
 import sys
+import optuna
 class Profile:
     def __init__(self):
         self.prof = cProfile.Profile()
@@ -23,8 +27,9 @@ class Profile:
         self.prof.disable()
         self.prof.print_stats(sort='time')
     
-# def log_exception(exc_type, exc_value, exc_traceback):
-#     logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    
+def log_exception(exc_type, exc_value, exc_traceback):
+    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 # Set the global exception hook
 # sys.excepthook = log_exception
@@ -54,6 +59,7 @@ torch.set_num_threads(32)
 from scripts.evaluate_model import evaluate_irl
 
 
+
 class DiscriminatorManager(nn.Module):
         def __init__(self, discriminator_early, discriminator_late, env):
             super(DiscriminatorManager, self).__init__()
@@ -79,33 +85,34 @@ class DiscriminatorManager(nn.Module):
 """arguments"""
 parser = argparse.ArgumentParser(description='PyTorch Unified PPP framework')
 
-parser.add_argument("--model", default="original", help="The learning model method. Current models: original or stgat")
+parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
 parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
 parser.add_argument("--l2_reg", default=0.1, help="PPO_regularization")
 
-parser.add_argument('--randomness_definition', default='deterministic',  type=str, help='either stochastic or deterministic')
-parser.add_argument('--step_definition', default='multi',  type=str, help='either single or multi')
+
+parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
+parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
 parser.add_argument('--loss_definition', default='l2',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
 parser.add_argument('--discount_factor', type=float, default=0.0, help='discount factor gamma, value between 0.0 and 1.0')
 parser.add_argument('--optim_value_iternum', type=int, default=1, help='minibatch size')
 
-parser.add_argument('--training_algorithm', default='reinforce',  type=str, help='choose which RL updating algorithm, either "reinforce", "baseline" or "ppo" or "ppo_only"')
+parser.add_argument('--training_algorithm', default='ppo',  type=str, help='choose which RL updating algorithm, either "reinforce", "baseline" or "ppo" or "ppo_only"')
 parser.add_argument('--trainable_noise', type=bool, default=False, help='add a noise to the input during training')
 parser.add_argument('--ppo-iterations', type=int, default=1, help='number of ppo iterations (default=1)')
 parser.add_argument('--ppo-clip', type=float, default=0.2, help='amount of ppo clipping (default=0.2)')
-parser.add_argument('--learning-rate', type=float, default=3e-4, metavar='G', help='learning rate (default: 1e-5)')
+parser.add_argument('--learning-rate', type=float, default=1e-3, metavar='G', help='learning rate (default: 1e-5)')
 parser.add_argument('--batch_size', default=64, type=int, help='number of sequences in a batch (can be multiple paths)')
 parser.add_argument('--log-std', type=float, default=-2.99, metavar='G', help='log std for the policy (default=-0.0)')
-parser.add_argument('--num_epochs', default=400, type=int, help='number of times the model sees all data')
+parser.add_argument('--num_epochs', default=330, type=int, help='number of times the model sees all data')
 
 parser.add_argument('--seeding', type=bool, default=True, help='turn seeding on or off')
-parser.add_argument('--seed', type=int, default=73, metavar='N', help='random seed (default: 0)')
+parser.add_argument('--seed', type=int, default=0, metavar='N', help='random seed (default: 0)')
 parser.add_argument('--multiple_executions', type=bool, default=True, help='turn multiple runs on or off')
 parser.add_argument('--runs', type=int, default=5, help='number of times the script runs')
 parser.add_argument('--all_datasets', type=bool, default=True, help='run the script for all 5 datasets at once or not')
 parser.add_argument('--dataset_name', default='hotel',  type=str, help='choose which dataset to train for')
-parser.add_argument('--check_testset', type=bool, default=True, help='also evaluate on the testset, next to validation set')
+parser.add_argument('--check_testset', type=bool, default=False, help='also evaluate on the testset, next to validation set')
 parser.add_argument('--output_dir', default=os.getcwd(), help='path where models are saved (default=current directory)')
 parser.add_argument('--save_model_name_ADE', default="saved_model_ADE", help='name of the saved model')
 parser.add_argument('--save_model_name_FDE', default="saved_model_FDE", help='name of the saved model')
@@ -120,8 +127,8 @@ parser.add_argument('--loader_num_workers', default=16, type=int, help='number c
 parser.add_argument('--skip', default=1, type=int, help='used for skipping sequences (default=1)')
 parser.add_argument('--delim', default='\t', help='how to read the data text file spacing')
 parser.add_argument('--l2_loss_weight', default=1, type=float, help='l2 loss multiplier (default=0)')
-parser.add_argument('--use_gpu', default=0, type=int)                   # use gpu, if 0, use cpu only
-parser.add_argument('--gpu-index', type=int, default=1, metavar='N')
+parser.add_argument('--use_gpu', default=1, type=int)                   # use gpu, if 0, use cpu only
+parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
 parser.add_argument('--load_saved_model', default=None, metavar='G', help='path of pre-trained model')
 
 #STGAT ==========================================================
@@ -163,7 +170,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr",
-    default= 0.00008, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    default=0.0005709531017751183, #=1e-3
     type=float,
     metavar="LR",
     help="initial learning rate",
@@ -171,7 +178,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--start-epoch",
-    default=300,
+    default=0,
     type=int,
     metavar="N",
     help="manual epoch number (useful on restarts)",
@@ -191,6 +198,7 @@ parser.add_argument(
 best_ade = 100
 # ================================================================
 
+
 args = parser.parse_args()
 
 def log_memory_usage(message):
@@ -198,7 +206,7 @@ def log_memory_usage(message):
     # logging.info(f"{message}: Memory usage is {memory} MB")
     cuda_memory = torch.cuda.memory_allocated()
     print(f"Memory RAM usage is {memory} MB and CUDA {cuda_memory}")
-def main_loop():
+def main_loop(args, writer, metric_dict, hparams):
 
     """"definitions"""
     if args.randomness_definition == 'stochastic':
@@ -221,10 +229,11 @@ def main_loop():
     torch.set_default_dtype(dtype)
     device = torch.device('cuda', index=args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
     if torch.cuda.is_available():
+        # print("AAAAAAAAAAA")
         torch.cuda.set_device(args.gpu_index)
     print("device: ", device)
     global mid_pad
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_num
+    
     """models"""
     if args.model=="original":
         mid_pad=0
@@ -360,9 +369,11 @@ def main_loop():
     print("Discriminator_net: ", discriminator_net)
     if (args.training_algorithm == 'baseline' or args.training_algorithm == 'ppo' or args.training_algorithm == 'ppo_only'):
         if args.scene_value_net==True:
+            print("AAAAAAAAAAAAAAA", device)
             value_net = Value(64)
             # print("WORKING")
         else:
+            print("AAAAAAAAAAAAAAA", device)
             value_net = Value(16)
         value_net.to(device)
         value_net.type(dtype).train()
@@ -456,7 +467,6 @@ def main_loop():
             'value-loss_val': [],
         }
         epoch = saved_model_ADE['epoch']
-        print("output_dir", args.output_dir)
         save_model_path_ADE = os.path.join(args.output_dir, '%s.pt' % args.save_model_name_ADE)
 
         """We also want a separate model that is optimized for FDE metric"""
@@ -490,7 +500,7 @@ def main_loop():
 
     """custom reward for policy"""
     def expert_reward(env, args, state, action, gt=0):     # probs separate function for discount
-        # print(args)
+
         state_action = torch.cat((state, action), dim=1)  # (b, 16) + (b, 24) = (b, 40)
         if args.loss_definition == 'discriminator':
             if args.model=='original' or args.disc_type=='original':
@@ -587,9 +597,12 @@ def main_loop():
 
 
     def train_loop():
+        min_ade, min_fde = float('inf'), float('inf')  
+        epoch_ade, epoch_fde = -1, -1 
         global training_step
         t0 = time.time()
         training_step = 1
+
 
         for epoch in range(args.start_epoch, args.num_epochs):     # epochs
             t1 = time.time()
@@ -606,7 +619,7 @@ def main_loop():
                 else:
                     if epoch == 250:
                         for param_group in policy_opt.param_groups:
-                            param_group["lr"] = 5e-3
+                            param_group["lr"] = args.lr #5e-3
                     training_step = 3
                     env.training_step=3
             """perform training steps"""
@@ -635,23 +648,23 @@ def main_loop():
                     writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
                     writer.add_scalar('train_loss_value', loss_value.item(), epoch)
             if args.model=="original" or args.model=="stgat" :
-                metrics_train = check_accuracy(env,args, train_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)       # limit=true causes sinusoidal train ADE
+                # metrics_train = check_accuracy(env,args, train_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)       # limit=true causes sinusoidal train ADE
 
                 loss_policy = loss_policy / train_loader_len
                 loss_discriminator = loss_discriminator / train_loader_len
                 loss_value = loss_value / train_loader_len
 
-                writer.add_scalar('train_loss_policy', loss_policy.item(), epoch)
-                writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
-                writer.add_scalar('train_loss_value', loss_value.item(), epoch)
-                writer.add_scalar('ADE_train', metrics_train['ade'], epoch)
-                writer.add_scalar('FDE_train', metrics_train['fde'], epoch)
+                # writer.add_scalar('train_loss_policy', loss_policy.item(), epoch)
+                # writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
+                # writer.add_scalar('train_loss_value', loss_value.item(), epoch)
+                # writer.add_scalar('ADE_train', metrics_train['ade'], epoch)
+                # writer.add_scalar('FDE_train', metrics_train['fde'], epoch)
 
-                print('train loss_policy: ', loss_policy.item())
-                print('train loss_discriminator: ', loss_discriminator.item())
-                print('train loss_value: ', loss_value.item())
-                print('train ADE: ', metrics_train['ade'])
-                print('train FDE: ', metrics_train['fde'])
+                # print('train loss_policy: ', loss_policy.item())
+                # print('train loss_discriminator: ', loss_discriminator.item())
+                # print('train loss_value: ', loss_value.item())
+                # print('train ADE: ', metrics_train['ade'])
+                # print('train FDE: ', metrics_train['fde'])
 
                 if epoch % args.check_validation_every == 0:
 
@@ -669,17 +682,12 @@ def main_loop():
                         loss_policy_val += policy_loss_val
                         loss_discriminator_val += discriminator_loss_val
                         loss_value_val += value_loss_val
-                    if args.model=="stgat":
-                        # metrics_validation = validate(args, policy_net, val_loader)
-                        metrics_validation = check_accuracy(env,args, val_loader, policy_net,args.obs_len, args.pred_len, device, limit=False)
 
-                    else:
-                        metrics_validation = check_accuracy(env,args, val_loader, policy_net,args.obs_len, args.pred_len, device, limit=False)
+                    # metrics_validation = check_accuracy(env,args, val_loader, policy_net,args.obs_len, args.pred_len, device, limit=False)
+                    metrics_validation = validate(args, policy_net, val_loader)
 
                     ### test set check
                     if args.check_testset is True:
-                        metrics_validation_test = check_accuracy(env,args, test_loader, policy_net, args.obs_len, args.pred_len, device, limit=False) 
-                        # test_ade, test_fde = metrics_validation_test['ade'], metrics_validation_test['fde']
                         test_ade, test_fde = evaluate_irl(env,args, test_loader, policy_net, num_samples=1, mean_action=True, noise=args.trainable_noise, device=device)
                         test_minade, test_minfde = evaluate_irl(env,args, test_loader, policy_net, num_samples=20, mean_action=False, noise=args.trainable_noise, device=device)
                         writer.add_scalar('ADE_test', test_ade, epoch)
@@ -697,13 +705,15 @@ def main_loop():
                     writer.add_scalar('validation_loss_value', loss_value_val.item(), epoch)
                     writer.add_scalar('ADE_val', metrics_validation['ade'], epoch)
                     writer.add_scalar('FDE_val', metrics_validation['fde'], epoch)
+                    if epoch==329:
+                        metric_dict.update({'ade': metrics_validation['ade'], 'fde': metrics_validation['fde']})  # Update metrics
+                        writer.add_hparams(hparams, metric_dict)
 
-
-                    print('validation loss_policy: ', loss_policy_val.item())
-                    print('validation loss_discriminator: ', loss_discriminator_val.item())
-                    print('validation loss_value: ', loss_value_val.item())
-                    print('validation ADE: ', metrics_validation['ade'])
-                    print('validation FDE: ', metrics_validation['fde'])
+                    # print('validation loss_policy: ', loss_policy_val.item())
+                    # print('validation loss_discriminator: ', loss_discriminator_val.item())
+                    # print('validation loss_value: ', loss_value_val.item())
+                    # print('validation ADE: ', metrics_validation['ade'])
+                    # print('validation FDE: ', metrics_validation['fde'])
 
                     if saved_model_ADE['ADE_val']:
                         min_ade = saved_model_ADE['ADE_val']  # both linear and non-linear
@@ -715,13 +725,11 @@ def main_loop():
                         min_fde = saved_model_FDE['FDE_val']  # both linear and non-linear
                     else:
                         min_fde = metrics_validation['fde']
-                    writer.add_scalar('min_ADE_VAL', min_ade, epoch)
-                    writer.add_scalar('min_FDE_VAL', min_fde, epoch)
-                    print('min_ADE_val: ', min_ade)
-                    print('min_FDE_val: ', min_fde)
+
                     if metrics_validation['ade'] <= min_ade:
-                        print("min_ade")
                         epoch_ade=epoch
+                        writer.add_scalar('epoch_ade', epoch_ade, epoch)
+                        writer.add_scalar('min_ade', min_ade, epoch)
                         print('New low for min ADE_val, model saved')
                         saved_model_ADE['epoch'] = epoch
                         saved_model_ADE['policy_net_state'] = policy_net.state_dict()
@@ -729,9 +737,9 @@ def main_loop():
                         saved_model_ADE['discriminator_net_state'] = discriminator_net.state_dict()
                         saved_model_ADE['discriminator_opt_state'] = discriminator_opt.state_dict()
                         saved_model_ADE['ADE_val'] = metrics_validation['ade']
-                        saved_model_ADE['ADE_train'] = metrics_train['ade']
+                        # saved_model_ADE['ADE_train'] = metrics_train['ade']
                         saved_model_ADE['FDE_val'] = metrics_validation['fde']
-                        saved_model_ADE['FDE_train'] = metrics_train['fde']
+                        # saved_model_ADE['FDE_train'] = metrics_train['fde']
                         saved_model_ADE['policy-loss_val'] = loss_policy_val.item()
                         saved_model_ADE['policy-loss_train'] = loss_policy.item()
                         saved_model_ADE['discriminator-loss_val'] = loss_discriminator_val.item()
@@ -739,9 +747,11 @@ def main_loop():
                         saved_model_ADE['value-loss_val'] = loss_value_val.item()
                         saved_model_ADE['value-loss_train'] = loss_value.item()
                         torch.save(saved_model_ADE, save_model_path_ADE)
-                        print("PATH", save_model_path_ADE)
+                        print("saving to: ", save_model_path_ADE)
                     if metrics_validation['fde'] <= min_fde:
                         epoch_fde=epoch
+                        writer.add_scalar('epoch_fde', epoch_fde, epoch)
+                        writer.add_scalar('min_fde', min_fde, epoch)
                         print('New low for min FDE_val, model saved')
                         saved_model_FDE['epoch'] = epoch
                         saved_model_FDE['policy_net_state'] = policy_net.state_dict()
@@ -749,9 +759,9 @@ def main_loop():
                         saved_model_FDE['discriminator_net_state'] = discriminator_net.state_dict()
                         saved_model_FDE['discriminator_opt_state'] = discriminator_opt.state_dict()
                         saved_model_FDE['ADE_val'] = metrics_validation['ade']
-                        saved_model_FDE['ADE_train'] = metrics_train['ade']
+                        # saved_model_FDE['ADE_train'] = metrics_train['ade']
                         saved_model_FDE['FDE_val'] = metrics_validation['fde']
-                        saved_model_FDE['FDE_train'] = metrics_train['fde']
+                        # saved_model_FDE['FDE_train'] = metrics_train['fde']
                         saved_model_FDE['policy-loss_val'] = loss_policy_val.item()
                         saved_model_FDE['policy-loss_train'] = loss_policy.item()
                         saved_model_FDE['discriminator-loss_val'] = loss_discriminator_val.item()
@@ -766,12 +776,13 @@ def main_loop():
 
     """execute train loop"""
     min_ade, min_fde, epoch_ade, epoch_fde=train_loop()
+    torch.cuda.empty_cache()
     return min_ade, min_fde, epoch_ade, epoch_fde
     # del policy_net
     # del discriminator_net
     # del discriminator_opt
     # del policy_opt
-print("HER5", os.getcwd())
+ 
 #STGAT =========================================================
 
 
@@ -826,93 +837,134 @@ def cal_ade_fde(pred_traj_gt, pred_traj_fake):
 
 #===============================================================
 if args.all_datasets:
-    datasets = ['eth', 'hotel', 'zara1', 'zara2', 'univ']  # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
+    datasets = ['eth'] # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
 else:
     datasets = [args.dataset_name]
 
 model_name_ADE_base = args.save_model_name_ADE
 model_name_FDE_base = args.save_model_name_FDE
 import webbrowser
-def start_tensorboard(logdir, port=6006):
-    # Start TensorBoard as a subprocess and redirect its output to devnull
-    tensorboard_url = f"http://localhost:{port}"
-    command = f"tensorboard --logdir={logdir} --port={port}"
-    with open('/dev/null', 'w') as devnull:
-        subprocess.Popen(command, shell=True, stdout=devnull, stderr=devnull)
-    
-    # Wait for TensorBoard to initialize
-    print(f"TensorBoard is starting at {tensorboard_url}")
-    time.sleep(3)  # Wait a few seconds for TensorBoard to start
 
-    # Open a web browser with the TensorBoard URL
-    webbrowser.open_new(tensorboard_url)
 def objective(args, trial):
-    # Example: Suggest a learning rate and dropout rate
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-4, 1e-6)
-    # dropout_rate = trial.suggest_uniform('dropout_rate', 0.0, 0.5)
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
+    # gc.collect()
+    # Example: Suggest a learning rate and dropout rate
+    # learning_rate=0.0005709531017751183
+    lr = trial.suggest_loguniform('lr', 5e-6, 9e-5)
+    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
+    args.learning_rate=learning_rate
+    # 0.00024036092775471976
+    optim_value_iternum=1
+    # optim_value_iternum=trial.suggest_categorical('optim_value_iternum', [1,3,5])
+    # l2_reg=trial.suggest_categorical('l2_reg', [0.0,0.2])
+    # ppo_clip=trial.suggest_categorical('ppo_clip', [0.1,0.2,0.4])
+    dropout_rate = 0 #trial.suggest_categorical('dropout',[0.0,0.2,0.5])
+    # batch_size = trial.suggest_categorical('batch_size', [16, 32, 64, 128, 512])
+    args.ppo_clip=0.2
+    ppo_iterations=trial.suggest_categorical('ppo_iterations', [8, 15])
+    args.optim_value_iternum=optim_value_iternum
+    args.lr = lr
+    args.ppo_iterations=ppo_iterations
+    
+    l2_reg=0.2
+    args.l2_reg=l2_reg
+    args.dropout = dropout_rate
+    # args.batch_size= batch_size
+    # Create a unique directory for each trial
+    print("TRIAL is logged as", trial._trial_id)
+    trial_dir = f"./optuna/trial_{ trial._trial_id}"
+    model_name_ADE = model_name_ADE_base + '_' + set + '_trial_run_' + str( trial._trial_id) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.learning_rate)+"_" +str(args.lr)+"_" +str(ppo_iterations)
+    model_name_FDE = model_name_FDE_base + '_' + set + '_trial_run_' + str( trial._trial_id) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.learning_rate)+"_" +str(args.lr)+"_" +str(ppo_iterations)
+    args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
+    args.save_model_name_ADE = model_name_ADE
+    args.save_model_name_FDE = model_name_FDE
+    os.makedirs(trial_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=trial_dir)
+    hparams = {
+        'learning_rate_value': args.learning_rate,
+        'learning_rate_policy': args.lr,
+        'ppo_iterations': args.ppo_iterations,
+        'l2_reg': args.l2_reg,
+        'dropout': args.dropout,
+        'batch_size': args.batch_size,  # Assuming you want to log this as well
+        'ppo_clip': args.ppo_clip
+    }
+
+    
     # Assign these suggested values to args
-    args.learning_rate = learning_rate
-    # args.dropout = dropout_rate
+    metric_dict = {
+    'ade': 0,  # You need to replace this with actual loss or another metric from your training loop
+    'fde': 0  # Placeholder, replace with your actual initial metric if applicable
+}
+    
 
     # Call your main training function here
-    ade, fde, ade_epoch, fde_epoch = main_loop(args)
+    ade, fde, ade_epoch, fde_epoch = main_loop(args, writer, metric_dict, hparams)
 
+    # gc.collect()
+    writer.close()
     # Return a metric to minimize or maximize
     return ade  # Let's minimize the Average Displacement Error (ADE)
+def load_or_create_study(study_name, storage_url):
+    print("trying to load")
+    return optuna.create_study(study_name=study_name, direction='minimize', storage=storage_url,  load_if_exists=True)
 
+def run_study():
+    gc.collect()
+    
+    study_name = 'example_study853.db'
+    storage_url = 'sqlite:///example_study.db'
+    
+    # Load or create the study
+    study = load_or_create_study(study_name, storage_url)
+    
+    # Add TensorBoardCallback to log results
+    # tensorboard_callback = TensorBoardCallback("./optuna/", metric_name='ade')
+    
+    study.optimize(partial(objective, args), n_trials=35, n_jobs=1)
+    
+    print("Best trial:")
+    print(" Value: ", study.best_trial.value)
+    print(" Params: ", study.best_trial.params)
+    gc.collect()
+for set in datasets:
+    
+#     trial_dir = f"./optuna/trial_bla"
+#     model_name_ADE = model_name_ADE_base + '_' + set + '_trial_run_' + str( 1) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.l2_reg)+"_" +str(args.ppo_clip)+"_" +str(args.ppo_iterations)
+#     model_name_FDE = model_name_FDE_base + '_' + set + '_trial_run_' + str( 1) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.l2_reg)+"_" +str(args.ppo_clip)+"_" +str(args.ppo_iterations)
+#     args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
+#     args.save_model_name_ADE = model_name_ADE
+#     args.save_model_name_FDE = model_name_FDE
+#     # os.makedirs(trial_dir, exist_ok=True)
+#     writer = SummaryWriter(log_dir=trial_dir)
+#     hparams = {
+#         'learning_rate_value': args.learning_rate,
+#         'learning_rate_policy': args.lr,
+#         'ppo_iterations': args.ppo_iterations,
+#         'l2_reg': args.l2_reg,
+#         'dropout': args.dropout,
+#         'batch_size': args.batch_size,  # Assuming you want to log this as well
+#         'ppo_clip': args.ppo_clip
+#     }
 
-if args.multiple_executions:
-    for i in range(args.runs):
-        for set in datasets:
-            args.dataset_name = set
-            # torch.cuda.empty_cache()
-            # print("WORKING")
-            gc.collect()
-            if args.seeding:
-                args.seed = i
-            if args.model=="stgat":
-                args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{i}.pth.tar'
-            print("RESUME PATH", args.resume )
-            model_name_ADE = model_name_ADE_base + '_' + set + '_run_' + str(i) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
-            model_name_FDE = model_name_FDE_base + '_' + set + '_run_' + str(i) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
-            # tensorboard_name =   tensorboard_name = os.path.join("/home/ssukup/unified-pedestrian-path-prediction-framework/tensorboard/bla", set + '_run_' + str(i)) #"../tensorboard/original_GAN" #'../tensorboard/' + set + 'run_' + str(i)
-            tensorboard_name= f"./logging/kbest_{args.best_k}_{args.dataset_name}_{i}_"
-            os.makedirs(tensorboard_name, exist_ok=True)
-            args.save_model_name_ADE = model_name_ADE
-            args.save_model_name_FDE = model_name_FDE
-            writer = SummaryWriter(log_dir=tensorboard_name)
-                    
-            # Specify the log directory and port
-            # log_directory = "./tensorboard_logs"
-            # start_tensorboard(log_directory)
-
-
-            if args.model=="original":
-                print("Dataset: " + set + ". Script execution number: " + str(i))
-            elif args.model=="stgat":
-                 print("Dataset: " + set + ". Script execution number: " + str(i)+ " Best k:"+ str(args.best_k))
-            main_loop()
-            # torch.cuda.empty_cache()
-            gc.collect()
-else:
-        # with Profile() as profile:
-            gc.collect()
-            # torch.cuda.empty_cache()
-            model_name_ADE = model_name_ADE_base + '_' + set + '_run_' + str(0) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
-            model_name_FDE = model_name_FDE_base + '_' + set + '_run_' + str(0) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
-            args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
-
-            tensorboard_name = '../tensorboard/' + set
-            args.save_model_name_ADE = model_name_ADE
-            args.save_model_name_FDE = model_name_FDE
-            writer = SummaryWriter(log_dir=tensorboard_name)
-            
-            if args.model=="original":
-                print("Dataset: " + set + ". Script execution number: " + str(0))
-            elif args.model=="stgat":
-                 print("Dataset: " + set + ". Script execution number: " + str(0)+ " Best k:"+ str(args.best_k))
-            main_loop()
-            # torch.cuda.empty_cache()
-            gc.collect()
+    
+#     # Assign these suggested values to args
+#     metric_dict = {
+#     'ade': 0,  # You need to replace this with actual loss or another metric from your training loop
+#     'fde': 0  # Placeholder, replace with your actual initial metric if applicable
+# }
+    
+    gc.collect()
+    args.dataset_name = set
+    # ade, fde, ade_epoch, fde_epoch = main_loop(args, writer, metric_dict, hparams)
+    
+    if args.model=="original":
+        print("Dataset: " + set + ". Script execution number: " + str(0))
+    elif args.model=="stgat":
+            print("Dataset: " + set + ". Script execution number: " + str(0)+ " Best k:"+ str(args.best_k))
+    run_study()
+    # torch.cuda.empty_cache()
+    
 
