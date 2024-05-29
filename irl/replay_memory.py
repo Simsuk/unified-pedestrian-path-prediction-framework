@@ -18,6 +18,7 @@ class Memory(object):
 
     def sample(self, batch_size=None):
         if batch_size is None:
+            # print("working")
             return Transition(*zip(*self.memory))
         else:
             random_batch = random.sample(self.memory, batch_size)

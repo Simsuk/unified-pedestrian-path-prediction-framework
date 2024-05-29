@@ -93,6 +93,10 @@ def l2_loss(pred_traj, pred_traj_gt, loss_mask, random=0, mode="average"):
     # equation below , the first part does noing, can be delete
     # print(pred_traj_gt.permute(1, 0, 2))
     # print(pred_traj.permute(1, 0, 2))
+    #torch.Size([185, 24])
+    # pred_traj_gt.shape
+    # torch.Size([12, 185, 2])
+    # action_full,shape
     loss = (pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)) ** 2
     if mode == "sum":
         return torch.sum(loss)
@@ -100,6 +104,8 @@ def l2_loss(pred_traj, pred_traj_gt, loss_mask, random=0, mode="average"):
         return torch.sum(loss) / torch.numel(loss_mask.data)
     elif mode == "raw":
         return loss.sum(dim=2).sum(dim=1)
+    elif mode== "full":
+        return loss.sum(dim=2)
 
 def final_displacement_error(pred_pos, pred_pos_gt, consider_ped=None, mode="sum"):
     """

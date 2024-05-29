@@ -7,6 +7,7 @@ def create_fake_trajectories(env,args,obs_traj_rel,pred_traj_gt_rel, policy,obs_
     obs_len = obs_traj_rel.shape[0]
 
     state = obs_traj_rel.permute(1, 0, 2)
+    # print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     state = torch.flatten(state, 1, 2)
     fake_traj = state                      # (b, 16) in x,y,x,y format
     # print("BATCH", fake_traj.shape[0])

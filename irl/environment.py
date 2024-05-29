@@ -63,7 +63,10 @@ class Environment:
 
         state = state.to(self.device)   #(b, 16)
         action = action.to(self.device) #(b, 2)
-        next_state = torch.cat((state, action), dim=1)[:, -self.obs_len*2:]  # (b, 16) appended action, discarded first time step
+        if self.args.model=='stgat' and self.args.step_definition=='multi':
+            next_state = torch.cat((state, action), dim=1)[:, -self.obs_len*2:]  # (b, 16) appended action, discarded first time step
+        else:
+            next_state = torch.cat((state, action), dim=1)[:, -self.obs_len*2:]  # (b, 16) appended action, discarded first time step
         reward = torch.zeros((state.shape[0], 1), device=self.device)
         self.step_counter = self.step_counter + 1
         if self.training_step==1 or self.training_step==2:
@@ -90,11 +93,11 @@ class Environment:
         gt_sum = torch.sum(gt, dim=1)
         gt = torch.flatten(gt, 1, 2)  # (b,24)
         # print("gt_env", gt.shape, os.path.basename(__file__))
-        if self.args.step_definition == 'single':
+        if self.args.step_definition == 'single' or self.args.model=='stgat':
             expert_single = torch.concat((state, gt), dim=1)   #(b,40)
             expert = expert_single
 
-        elif self.args.step_definition == 'multi':
+        elif self.args.step_definition == 'multi' and self.args.model=='original':
             sa_len = state.shape[1] + 2         # 16 + 2 = 18
             expert_state_actions = []
             expert_full = torch.concat((state, gt), dim=1)  # (b,40)
@@ -102,7 +105,7 @@ class Environment:
                 state_action = expert_full[:, i*2:(i*2) + sa_len]   # sliding window of (b,18) for 12 steps
                 expert_state_actions.append(state_action)
             expert_multi = torch.cat(expert_state_actions, dim=0)     #(bx12, 18)
-            expert = expert_multi
-
+            # expert = expert_multi
+            expert=expert_full
         return expert
 

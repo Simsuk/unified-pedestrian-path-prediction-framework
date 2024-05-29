@@ -145,6 +145,7 @@ class Value(nn.Module):
 
     def forward(self, x):
         # x = self.batch_norm(x)
+        # print("working")
         for affine in self.affine_layers:
             x = self.activation(affine(x))
 

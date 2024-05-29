@@ -151,10 +151,12 @@ class TrajectoryGenerator(nn.Module):
         # torch.manual_seed(72)
         self.obs_len = obs_len
         self.pred_len = pred_len
-        # device = torch.device('cuda', index=self.args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
+
+        device = torch.device('cuda', index=self.args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
         # self.action_log_std = (torch.ones(1, action_dim) * log_std).to(device)
         self.action_log_std = nn.Parameter(torch.ones(1, action_dim) * log_std)
-
+        # self.action_log_std = torch.Tensor(torch.ones(1, action_dim) * log_std).to(device)
+        # self.action_log_std = torch.full((1, action_dim), fill_value=log_std, device=device)
              # existing initialization code
         self.noise_dim = noise_dim
         self.noise_type = noise_type
@@ -187,7 +189,8 @@ class TrajectoryGenerator(nn.Module):
             self.traj_lstm_hidden_size + self.graph_lstm_hidden_size, 2
         )
         self.pred_hidden2pos = nn.Linear(self.pred_lstm_hidden_size, 2)
-
+        self.graph_lstm_layer_norm = nn.LayerNorm(graph_lstm_hidden_size)
+        self.pred_lstm_layer_norm = nn.LayerNorm(self.pred_lstm_hidden_size)
         self.noise_dim = noise_dim
         self.noise_type = noise_type
 
@@ -268,7 +271,7 @@ class TrajectoryGenerator(nn.Module):
             model_input = torch.cat((inter, env.pred_traj_gt_rel), dim=0)
             action_mean, action_log_std, action_std = self.forward(model_input,  obs_traj_pos,  env.seq_start_end, 0, env.training_step)
             action_mean, action_log_std, action_std = torch.flatten(action_mean, 0,1), torch.flatten(action_log_std, 0,1),torch.flatten(action_std, 0,1)
-            
+            # print('as')
         return normal_log_density(actions, action_mean, action_log_std, action_std)
     def select_action(self, obs_traj_rel, obs_traj_pos,  seq_start_end,seed, training_step=3):
         if training_step == 1 or training_step == 2:
@@ -368,6 +371,7 @@ class TrajectoryGenerator(nn.Module):
                 graph_lstm_h_t, graph_lstm_c_t = self.graph_lstm_model(
                     input_t.squeeze(0), (graph_lstm_h_t, graph_lstm_c_t)
                 )
+                # graph_lstm_h_t = self.graph_lstm_layer_norm(graph_lstm_h_t)
                 graph_lstm_hidden_states += [graph_lstm_h_t]
         if training_step == 1 or training_step == 2:
             outputs= torch.stack(pred_traj_rel)
@@ -400,6 +404,7 @@ class TrajectoryGenerator(nn.Module):
                     pred_lstm_hidden, pred_lstm_c_t = self.pred_lstm_model(
                         input_t.squeeze(0), (pred_lstm_hidden, pred_lstm_c_t)
                     )
+                    # pred_lstm_hidden = self.pred_lstm_layer_norm(pred_lstm_hidden)
                     output = self.pred_hidden2pos(pred_lstm_hidden)
                     pred_traj_rel += [output]
                 outputs = torch.stack(pred_traj_rel)
