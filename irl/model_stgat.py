@@ -163,7 +163,8 @@ class TrajectoryGenerator(nn.Module):
         self.inter_states=None
         # Initialize the fixed part of the noise
         if self.args.pretraining==True:
-            self.fixed_noise = get_noise((1,) + self.noise_dim, self.noise_type)            
+            self.fixed_noise = get_noise((1,) + self.noise_dim, self.noise_type)    
+            print("AAAAAAAAAAAAAAAAAA")        
         else:
             self.register_buffer('fixed_noise', get_noise((1,) + self.noise_dim, self.noise_type))
         # self.pred_len = 1 if args.step_definition=="single" else pred_len
@@ -221,6 +222,7 @@ class TrajectoryGenerator(nn.Module):
         noise_shape = (seq_start_end.size(0),) + self.noise_dim
         if self.args.randomness_definition=='deterministic':
             z_decoder = get_noise(noise_shape, self.noise_type)
+            # print(z_decoder)
         elif self.args.randomness_definition=='stochastic':
 
                     dynamic_noise_shape = [seq_start_end.size(0)] + [1] * (len(self.fixed_noise.shape) - 1)
@@ -276,13 +278,15 @@ class TrajectoryGenerator(nn.Module):
     def select_action(self, obs_traj_rel, obs_traj_pos,  seq_start_end,seed, training_step=3):
         if training_step == 1 or training_step == 2:
             action_mean, _, action_std = self.forward(obs_traj_rel, obs_traj_pos,  seq_start_end, 1,training_step)
+            
         else:
             # print("obs_traj_rel",obs_traj_rel.shape)
             action_mean, _, action_std = self.forward(obs_traj_rel, obs_traj_pos,  seq_start_end,0, training_step)
+            # print(action_std)
             # print(action_mean[0][0])
         # torch.manual_seed(seed)   
         # print(action_mean[0][0])   
-        action = torch.normal(action_mean, action_std)
+        action = torch.normal(action_mean, 0.05)
         # torch.manual_seed(self.args.seed)   
         # print("action",action[0][0])
 

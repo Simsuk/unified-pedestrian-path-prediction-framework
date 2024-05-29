@@ -142,7 +142,7 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                         l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="raw")
                         )
                         reward_full = -torch.stack(l2_loss_rel, dim=1).squeeze() # list b*[(1)]
-                        reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
+                        # reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
                         
                         #THIS ONE TO USE
                         # l2_loss_rel=(gt - state_action)**2 

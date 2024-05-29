@@ -79,12 +79,12 @@ class DiscriminatorManager(nn.Module):
 """arguments"""
 parser = argparse.ArgumentParser(description='PyTorch Unified PPP framework')
 
-parser.add_argument("--model", default="original", help="The learning model method. Current models: original or stgat")
+parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
 parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
 parser.add_argument("--l2_reg", default=0.1, help="PPO_regularization")
 
-parser.add_argument('--randomness_definition', default='deterministic',  type=str, help='either stochastic or deterministic')
-parser.add_argument('--step_definition', default='multi',  type=str, help='either single or multi')
+parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
+parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
 parser.add_argument('--loss_definition', default='l2',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
 parser.add_argument('--discount_factor', type=float, default=0.0, help='discount factor gamma, value between 0.0 and 1.0')
@@ -121,7 +121,7 @@ parser.add_argument('--skip', default=1, type=int, help='used for skipping seque
 parser.add_argument('--delim', default='\t', help='how to read the data text file spacing')
 parser.add_argument('--l2_loss_weight', default=1, type=float, help='l2 loss multiplier (default=0)')
 parser.add_argument('--use_gpu', default=0, type=int)                   # use gpu, if 0, use cpu only
-parser.add_argument('--gpu-index', type=int, default=1, metavar='N')
+parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
 parser.add_argument('--load_saved_model', default=None, metavar='G', help='path of pre-trained model')
 
 #STGAT ==========================================================
@@ -163,7 +163,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr",
-    default= 0.00008, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    default=  8.623230816228654e-05, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
     type=float,
     metavar="LR",
     help="initial learning rate",
@@ -198,7 +198,7 @@ def log_memory_usage(message):
     # logging.info(f"{message}: Memory usage is {memory} MB")
     cuda_memory = torch.cuda.memory_allocated()
     print(f"Memory RAM usage is {memory} MB and CUDA {cuda_memory}")
-def main_loop():
+def main_loop(writer):
 
     """"definitions"""
     if args.randomness_definition == 'stochastic':
@@ -578,7 +578,7 @@ def main_loop():
         """perform policy (REINFORCE) update"""
         for _ in range(args.policy_steps):
             policy_loss, value_loss = reinforce_step(args, env, policy_net, policy_opt, expert_reward, states_all, actions_all,
-                                         rewards_all, rewards, expert, train, value_net, value_opt, value_crt, training_step=training_step)
+                                         rewards_all, rewards, expert, train, value_net, value_opt, value_crt, training_step=training_step, epoch=epoch, writer=writer)
 
             loss_policy += policy_loss
             loss_value += value_loss
@@ -826,7 +826,7 @@ def cal_ade_fde(pred_traj_gt, pred_traj_fake):
 
 #===============================================================
 if args.all_datasets:
-    datasets = ['eth', 'hotel', 'zara1', 'zara2', 'univ']  # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
+    datasets = ['zara1']  # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
 else:
     datasets = [args.dataset_name]
 
@@ -863,7 +863,7 @@ def objective(args, trial):
 
 
 if args.multiple_executions:
-    for i in range(args.runs):
+    for i in [1]:
         for set in datasets:
             args.dataset_name = set
             # torch.cuda.empty_cache()
@@ -874,7 +874,7 @@ if args.multiple_executions:
             if args.model=="stgat":
                 args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{i}.pth.tar'
             print("RESUME PATH", args.resume )
-            model_name_ADE = model_name_ADE_base + '_' + set + '_run_' + str(i) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
+            model_name_ADE = model_name_ADE_base + '_' + set + '_run_' + str(i) +"_Policy_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
             model_name_FDE = model_name_FDE_base + '_' + set + '_run_' + str(i) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
             # tensorboard_name =   tensorboard_name = os.path.join("/home/ssukup/unified-pedestrian-path-prediction-framework/tensorboard/bla", set + '_run_' + str(i)) #"../tensorboard/original_GAN" #'../tensorboard/' + set + 'run_' + str(i)
             tensorboard_name= f"./logging/kbest_{args.best_k}_{args.dataset_name}_{i}_"
@@ -887,12 +887,13 @@ if args.multiple_executions:
             # log_directory = "./tensorboard_logs"
             # start_tensorboard(log_directory)
 
-
+            for arg, value in vars(args).items():
+                writer.add_text(arg, str(value))
             if args.model=="original":
                 print("Dataset: " + set + ". Script execution number: " + str(i))
             elif args.model=="stgat":
                  print("Dataset: " + set + ". Script execution number: " + str(i)+ " Best k:"+ str(args.best_k))
-            main_loop()
+            main_loop(writer)
             # torch.cuda.empty_cache()
             gc.collect()
 else:
@@ -915,4 +916,3 @@ else:
             main_loop()
             # torch.cuda.empty_cache()
             gc.collect()
-

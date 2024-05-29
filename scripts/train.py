@@ -27,6 +27,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--log_dir", default="./", help="Directory containing logging file")
 """arguments"""
 parser = argparse.ArgumentParser(description='PyTorch Unified PPP framework')
+parser.add_argument("--gpu-index", type=int, default=1, metavar='N')
+
 parser.add_argument("--pretraining", default=True, help="pretraining in first 2 phases or not")
 
 parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
@@ -102,10 +104,10 @@ parser.add_argument(
     help="manual epoch number (useful on restarts)",
 )
 
-parser.add_argument("--best_k", default=20, type=int)
+parser.add_argument("--best_k", default=1, type=int)
 parser.add_argument("--print_every", default=10, type=int)
 parser.add_argument("--use_gpu", default=1, type=int)
-parser.add_argument("--gpu_num", default="0", type=str)
+parser.add_argument("--gpu_num", default="1", type=str)
 
 parser.add_argument(
     "--resume",
@@ -391,15 +393,16 @@ if __name__ == "__main__":
             os.mkdir(checkpoint_dir)
         main(args)
     else:
-        for k in [0,1,2,3,4]:
-            for i, set in enumerate([ 'zara1', 'zara2', 'univ']):
+        for k in [ 0,3,4]:
+            print("working")
+            for i, set in enumerate([ 'zara1', 'univ', 'hotel']):
                 args.dataset_name=set
                 args.seed = k+5
                 args.run=k
                 print(args.seed)
                 # utils.set_logger(os.path.join(args.log_dir, "train.log"))
                 
-                checkpoint_dir = "./pretrained_STGAT/kbest_20"
+                checkpoint_dir = "./pretrained_STGAT/kbest_1"
                 print("path", f"{args.checkpoint_dir}/model_best_{args.dataset_name}_{args.run}.pth.tar")
                 args.checkpoint_dir=checkpoint_dir
                 print("Dataset: " + set + ". Script execution number: " + str(i))

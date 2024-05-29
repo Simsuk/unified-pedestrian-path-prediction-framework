@@ -5,15 +5,15 @@ import numpy as np
 import random
 import torch.nn.functional as F
 import time
-
+from collections import defaultdict
 from attrdict import AttrDict
 import os
-
+metrics = defaultdict(list)
 # Specify the directory you want to switch to
-# directory_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/scripts'
+directory_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/scripts'
 
-# # Change the current working directory
-# os.chdir(directory_path)
+# Change the current working directory
+os.chdir(directory_path)
 
 from irl.data.loader import data_loader
 from irl.models import Policy
@@ -35,7 +35,7 @@ torch.backends.cudnn.benchmark = True
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_name', default='eth', type=str)
 parser.add_argument('--model_path', default="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/PPO_ONLY/superparam_search/lr_iters_10_or_15") # "../models/model_average" "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt", type=str) #../models/model_average
-parser.add_argument('--dset_type', default='val', type=str)
+parser.add_argument('--dset_type', default='test', type=str)
 parser.add_argument('--model_average', default=True, type=bool)
 parser.add_argument('--runs', type=int, default=1, help='number of models to compute average')
 parser.add_argument('--prediction_steps', default=None, type=int)
@@ -130,7 +130,7 @@ def get_policy(args,model,checkpoint):
         policy_net.eval()
     elif model=="stgat":
         _args = AttrDict(checkpoint['args'])
-        print(_args.randomness_definition)
+        
         args.seed=_args.seed
         args.dataset_name=_args.dataset_name
         # print(args)
@@ -184,7 +184,7 @@ def compute_av_std(ADE, FDE, minADE, minFDE):
     FDE = torch.stack(FDE)
     minADE = torch.stack(minADE)
     minFDE = torch.stack(minFDE)
-    print("ADEEEEEEEEEEEEEEE", ADE)
+    # print("ADEEEEEEEEEEEEEEE", ADE)
     av_ade = torch.mean(ADE)
     std_ade = torch.std(ADE, unbiased=False)
     low_ade = torch.min(ADE)
@@ -192,7 +192,8 @@ def compute_av_std(ADE, FDE, minADE, minFDE):
     av_fde = torch.mean(FDE)
     std_fde = torch.std(FDE, unbiased=False)
     low_fde = torch.min(FDE)
-
+    print("ADE", ADE)
+    print("minFDE", minFDE)
     av_min_ade = torch.mean(minADE)
     std_min_ade = torch.std(minADE, unbiased=False)
     low_min_ade = torch.min(minADE)
@@ -204,17 +205,25 @@ def compute_av_std(ADE, FDE, minADE, minFDE):
     return av_ade, av_fde, av_min_ade, av_min_fde, std_ade, std_fde, std_min_ade, std_min_fde, low_ade, low_fde, low_min_ade, low_min_fde
 
 
-def add_noise_state(state, device):
+def add_noise_state(args,state, device):
     # add noise from gaussian to state (b,16)
     noise_dim = 2
     noise_std = 0.05
     pad_dim = state.shape[1] - noise_dim
-    noise_shape = (state.shape[0], noise_dim)
-    noise = torch.randn(noise_shape).to(device)
-    noise = noise * noise_std
+    if args.model=="stgat": 
+        noise_shape = (state.shape[0], noise_dim)
+        noise = torch.randn(noise_shape).to(device)
+        # print(noise)
+        noise = noise * noise_std
+        pad = (pad_dim, 0, 0, 0)
+        noise = F.pad(noise, pad, "constant", 0)  # effectively zero padding
+    else:
+        noise_shape = (state.shape[0], noise_dim)
+        noise = torch.randn(noise_shape).to(device)
+        noise = noise * noise_std
 
-    pad = (pad_dim, 0, 0, 0)
-    noise = F.pad(noise, pad, "constant", 0)  # effectively zero padding
+        pad = (pad_dim, 0, 0, 0)
+        noise = F.pad(noise, pad, "constant", 0)  # effectively zero padding
 
     state = state + noise
     return state
@@ -230,7 +239,7 @@ def create_fake_trajectories(env,args,obs_traj_rel, pred_traj_gt_rel,seq_start_e
                 action = policy.select_action(state)
             else:
                 if noise:
-                    state = add_noise_state(state, device)                                          # this is to add noise remove if no worky or make better if worky
+                    state = add_noise_state(args, state, device)                                          # this is to add noise remove if no worky or make better if worky
                 action, _, _ = policy(state)    #meanaction for deterministic
             fake_traj = torch.cat((fake_traj, action), dim=1)
             next_state = torch.cat((state, action), dim=1)[:, -obs_len * 2:]
@@ -242,13 +251,18 @@ def create_fake_trajectories(env,args,obs_traj_rel, pred_traj_gt_rel,seq_start_e
         pred_traj_fake_rel = fake_traj.permute(1, 0, 2)                          # (12, b, 2)
     elif args.model=="stgat":
             # happens only in training_step==3 because only then we generate 12 trajectories
-            model_input=torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+            
             # print(model_input.shape)
             # print("stohcasticity:", randomness_definition)
-            if randomness_definition == 'stochastic':
+            if mean_action==False:
+                model_input=torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+
                 pred_traj_fake_rel  = policy.select_action(model_input, obs_traj_rel,seq_start_end, seed,3)
                 # print("mistake")
             else:
+                # obs_traj_rel = add_noise_state(args, obs_traj_rel, device) 
+                model_input=torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+                 
                 pred_traj_fake_rel, _, _ = policy(model_input, obs_traj_rel,seq_start_end ,0, 3)  
                 # print("output", pred_traj_fake_rel[0])
 
@@ -268,8 +282,8 @@ def evaluate_irl(env,args, loader, policy_net, num_samples, mean_action, noise, 
             total_traj += pred_traj_gt.size(1)
             # print(num_samples)
             for i in range(num_samples):
-                # torch.backends.cudnn.benchmark = False
-                # torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
                 # seed = time.time_ns() + i
                 seed=args.seed
                 # torch.manual_seed(seed)                
@@ -290,6 +304,7 @@ def evaluate_irl(env,args, loader, policy_net, num_samples, mean_action, noise, 
 
             ade_outer.append(ade_sum)
             fde_outer.append(fde_sum)
+        # print(ade_outer)
         ade = sum(ade_outer) / (total_traj * args.pred_len)
         fde = sum(fde_outer) / (total_traj)
         return ade, fde
@@ -299,7 +314,7 @@ class fake_env():
         self.training_step=training_step
 def main(args):
     if args.model_average:
-        # args.model_path = "../models/model_average" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" #"../models/model_average" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" # 
+        args.model_path ="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/PPO_ONLY/BEST_FINAL_RESULTS/saved_model_ADE_zara2_run_2_Policy_1_length_12.pt"# "../models/model_average" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" #"../models/model_average" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" # 
         ADE = []
         FDE = []
         minADE = []
@@ -320,6 +335,7 @@ def main(args):
             os.path.join(args.model_path, file_) for file_ in filenames
             if os.path.isfile(os.path.join(args.model_path, file_)) and file_.endswith('.pt')
         ]
+        # print(paths)
     else:
         if args.model_path.endswith('.pt'):
             paths = [args.model_path]
@@ -333,15 +349,18 @@ def main(args):
         # print("PATH", path)
         checkpoint = torch.load(path)
         # checkpoint["policy_net_state"].pop('action_log_std', None)
+       
         policy_net = get_policy(args,args.model,checkpoint)
         # print("lr", checkpoint['lr'])
         _args = AttrDict(checkpoint['args'])
         print("LR", _args.lr)
         print("EPOCH", checkpoint['epoch'])
-        print("VALUE", _args.learning_rate)
-        print("ppo_clip", _args.ppo_clip)
-        print("optim_value_iternum", _args.optim_value_iternum)
-        print("l2_reg", _args.l2_reg)
+        _args.randomness_definition='deterministic'
+        _args.pretraining=False
+        # print("VALUE", _args.learning_rate)
+        # print("ppo_clip", _args.ppo_clip)
+        # print("optim_value_iternum", _args.optim_value_iternum)
+        # print("l2_reg", _args.l2_reg)
         seeding = _args.seed
         # print("SEED", seeding)
         # args.seed= _args.seed
@@ -360,7 +379,12 @@ def main(args):
         model_name = path.split("saved_model_")[1].split(".p")[0].ljust(30)
         path = get_dset_path(_args.dataset_name, args.dset_type)
         _, loader = data_loader(_args, path)
+        print(_args.randomness_definition)
         ade, fde = evaluate_irl(env,_args, loader, policy_net, 1, mean_action=True, noise=False, device=device)
+        metrics['ade'].append(ade)
+        metrics['fde'].append(fde)
+
+
         if args.model_average is False:
             print('Dataset: {}, Pred Len: {}, ADE: {:.2f}, FDE: {:.2f}'.format(
                 _args.dataset_name, _args.pred_len, ade, fde))
@@ -370,6 +394,8 @@ def main(args):
 
         ## best k predicting
         min_ade, min_fde = evaluate_irl(env,_args, loader, policy_net, 20, mean_action=False, noise=args.noise, device=device)
+        metrics['min_ade'].append(min_ade)
+        metrics['min_fde'].append(min_fde)
         if args.model_average is False:
             print('Dataset: {}, Pred Len: {}, k: {}, minADE: {:.2f}, minFDE: {:.2f}'.format(
                 _args.dataset_name, _args.pred_len, args.num_samples, min_ade, min_fde))
@@ -387,10 +413,10 @@ def main(args):
         if args.model_average is True and path_counter == args.runs:
             print("\nAverage for path: ", temp_path)
             av_ade, av_fde, av_min_ade, av_min_fde, std_ade, std_fde, std_min_ade, std_min_fde, low_ade, low_fde, low_min_ade, low_min_fde = compute_av_std(ADE, FDE, minADE, minFDE)
-
-            print('Dataset: {}, Pred Len: {}, mean ADE: {:.2f}, std ADE: {:.4f}, low ADE: {:.2f}, mean FDE: {:.2f}, std FDE: {:.4f}, low FDE: {:.2f}'.format(
+            
+            print('Dataset: {}, Pred Len: {}, mean ADE: {:.4f}, std ADE: {:.2f}, low ADE: {:.4f}, mean FDE: {:.4f}, std FDE: {:.2f}, low FDE: {:.2f}'.format(
                 _args.dataset_name, _args.pred_len, av_ade, std_ade, low_ade, av_fde, std_fde, low_fde))
-            print('Dataset: {}, Pred Len: {}, k: {}, mean minADE: {:.2f}, std minADE: {:.4f}, low minADE: {:.2f}, mean minFDE: {:.2f}, std minFDE: {:.4f}, low minFDE: {:.2f}'.format(
+            print('Dataset: {}, Pred Len: {}, k: {}, mean minADE: {:.4f}, std minADE: {:.4f}, low minADE: {:.2f}, mean minFDE: {:.4f}, std minFDE: {:.2f}, low minFDE: {:.2f}'.format(
                 _args.dataset_name, _args.pred_len, args.num_samples, av_min_ade, std_min_ade, low_min_ade, av_min_fde, std_min_fde, low_min_fde))
 
             path_counter = 0
@@ -403,6 +429,13 @@ def main(args):
                 np.random.seed(seeding)
             print("=================================================")
 
+    values= [values for metric, values in metrics.items()]
+    print(values)
+    average_results = {metric: sum(values) / len(values) for metric, values in metrics.items()}
+    print(f"Average ADE: {average_results['ade']:.4f}")
+    print(f"Average minADE: {average_results['min_ade']:.4f}")
+    print(f"Average FDE: {average_results['fde']:.4f}")
+    print(f"Average minFDE: {average_results['min_fde']:.4f}")
 if __name__ == '__main__':
     
     args = parser.parse_args()
