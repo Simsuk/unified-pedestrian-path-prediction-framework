@@ -31,6 +31,7 @@ class Profile:
 
 # Configure logging
 # logging.basicConfig(level=logging.ERROR, filename='errors.log')
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 
 from irl.utils import *
 from irl.models import Policy, Discriminator, Value
@@ -49,8 +50,8 @@ import logging
 import psutil
 from torch.utils.tensorboard import SummaryWriter
 import psutil
- 
-torch.set_num_threads(32)
+# torch.cuda.memory.set_per_process_memory_fraction(32 / torch.cuda.get_device_properties(0).total_memory)
+# torch.set_num_threads(32)
 from scripts.evaluate_model import evaluate_irl
 
 
@@ -75,27 +76,29 @@ class DiscriminatorManager(nn.Module):
             self.discriminator_late.to(*args, **kwargs)
             return self
 
-
+def clear_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
 """arguments"""
 parser = argparse.ArgumentParser(description='PyTorch Unified PPP framework')
 
 parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
 parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
-parser.add_argument("--l2_reg", default=0.1, help="PPO_regularization")
+parser.add_argument("--l2_reg", default=0.0, help="PPO_regularization")
 
 parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
-parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
+parser.add_argument('--step_definition', default='multi',  type=str, help='either single or multi')
 parser.add_argument('--loss_definition', default='l2',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
-parser.add_argument('--discount_factor', type=float, default=0.0, help='discount factor gamma, value between 0.0 and 1.0')
+parser.add_argument('--discount_factor', type=float, default=1, help='discount factor gamma, value between 0.0 and 1.0')
 parser.add_argument('--optim_value_iternum', type=int, default=1, help='minibatch size')
 
 parser.add_argument('--training_algorithm', default='reinforce',  type=str, help='choose which RL updating algorithm, either "reinforce", "baseline" or "ppo" or "ppo_only"')
 parser.add_argument('--trainable_noise', type=bool, default=False, help='add a noise to the input during training')
-parser.add_argument('--ppo-iterations', type=int, default=1, help='number of ppo iterations (default=1)')
+parser.add_argument('--ppo-iterations', type=int, default=10, help='number of ppo iterations (default=1)')
 parser.add_argument('--ppo-clip', type=float, default=0.2, help='amount of ppo clipping (default=0.2)')
-parser.add_argument('--learning-rate', type=float, default=3e-4, metavar='G', help='learning rate (default: 1e-5)')
-parser.add_argument('--batch_size', default=64, type=int, help='number of sequences in a batch (can be multiple paths)')
+parser.add_argument('--learning-rate', type=float, default=0.00001, metavar='G', help='learning rate (default: 1e-5)')
+parser.add_argument('--batch_size', default=4, type=int, help='number of sequences in a batch (can be multiple paths)')
 parser.add_argument('--log-std', type=float, default=-2.99, metavar='G', help='log std for the policy (default=-0.0)')
 parser.add_argument('--num_epochs', default=400, type=int, help='number of times the model sees all data')
 
@@ -120,8 +123,8 @@ parser.add_argument('--loader_num_workers', default=16, type=int, help='number c
 parser.add_argument('--skip', default=1, type=int, help='used for skipping sequences (default=1)')
 parser.add_argument('--delim', default='\t', help='how to read the data text file spacing')
 parser.add_argument('--l2_loss_weight', default=1, type=float, help='l2 loss multiplier (default=0)')
-parser.add_argument('--use_gpu', default=0, type=int)                   # use gpu, if 0, use cpu only
-parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
+parser.add_argument('--use_gpu', default=1, type=int)                   # use gpu, if 0, use cpu only
+parser.add_argument('--gpu-index', type=int, default=1, metavar='N')
 parser.add_argument('--load_saved_model', default=None, metavar='G', help='path of pre-trained model')
 
 #STGAT ==========================================================
@@ -163,7 +166,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr",
-    default=  8.623230816228654e-05, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    default=  1e-4, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
     type=float,
     metavar="LR",
     help="initial learning rate",
@@ -378,13 +381,13 @@ def main_loop(writer):
     elif args.model=="stgat":
         policy_opt = optim.Adam(
         [
-            {"params": policy_net.traj_lstm_model.parameters(), "lr": args.lr},#1e-2
-            {"params": policy_net.traj_hidden2pos.parameters()},
-            {"params": policy_net.gatencoder.parameters(), "lr": args.lr}, #3e-2
-            {"params": policy_net.graph_lstm_model.parameters(), "lr": args.lr}, #1e-2}
-            {"params": policy_net.traj_gat_hidden2pos.parameters()},
-            {"params": policy_net.pred_lstm_model.parameters()},
-            {"params": policy_net.pred_hidden2pos.parameters()},
+            {"params": policy_net.traj_lstm_model.parameters(), "lr": args.lr },#1e-2
+            {"params": policy_net.traj_hidden2pos.parameters(), "lr": args.lr },
+            {"params": policy_net.gatencoder.parameters(), "lr": args.lr }, #3e-2
+            {"params": policy_net.graph_lstm_model.parameters(), "lr": args.lr }, #1e-2}
+            {"params": policy_net.traj_gat_hidden2pos.parameters(), "lr": args.lr },
+            {"params": policy_net.pred_lstm_model.parameters(), "lr": args.lr },
+            {"params": policy_net.pred_hidden2pos.parameters(), "lr": args.lr },
         ],
         lr= args.lr ,#args.lr,
         )
@@ -577,6 +580,7 @@ def main_loop(writer):
 
         """perform policy (REINFORCE) update"""
         for _ in range(args.policy_steps):
+            # for single actions_all[0].shape= torch.Size([2220, 2])
             policy_loss, value_loss = reinforce_step(args, env, policy_net, policy_opt, expert_reward, states_all, actions_all,
                                          rewards_all, rewards, expert, train, value_net, value_opt, value_crt, training_step=training_step, epoch=epoch, writer=writer)
 
@@ -762,6 +766,7 @@ def main_loop(writer):
 
             t2 = time.time()
             print_time(t0, t1, t2, epoch)
+        clear_memory()
         return min_ade, min_fde, epoch_ade, epoch_fde
 
     """execute train loop"""
@@ -826,7 +831,7 @@ def cal_ade_fde(pred_traj_gt, pred_traj_fake):
 
 #===============================================================
 if args.all_datasets:
-    datasets = ['zara1']  # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
+    datasets = ['eth']  # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
 else:
     datasets = [args.dataset_name]
 
@@ -863,7 +868,7 @@ def objective(args, trial):
 
 
 if args.multiple_executions:
-    for i in [1]:
+    for i in range(args.runs):
         for set in datasets:
             args.dataset_name = set
             # torch.cuda.empty_cache()
@@ -878,6 +883,7 @@ if args.multiple_executions:
             model_name_FDE = model_name_FDE_base + '_' + set + '_run_' + str(i) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
             # tensorboard_name =   tensorboard_name = os.path.join("/home/ssukup/unified-pedestrian-path-prediction-framework/tensorboard/bla", set + '_run_' + str(i)) #"../tensorboard/original_GAN" #'../tensorboard/' + set + 'run_' + str(i)
             tensorboard_name= f"./logging/kbest_{args.best_k}_{args.dataset_name}_{i}_"
+            print(tensorboard_name)
             os.makedirs(tensorboard_name, exist_ok=True)
             args.save_model_name_ADE = model_name_ADE
             args.save_model_name_FDE = model_name_FDE
@@ -900,8 +906,8 @@ else:
         # with Profile() as profile:
             gc.collect()
             # torch.cuda.empty_cache()
-            model_name_ADE = model_name_ADE_base + '_' + set + '_run_' + str(0) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
-            model_name_FDE = model_name_FDE_base + '_' + set + '_run_' + str(0) +"_Best_k_"+  str(args.best_k)  +"_length_"+ str(args.pred_len)
+            model_name_ADE = model_name_ADE_base + '_' + set + '_run_' + str(i) +"_Policy_"+  str(args.lr)  +"_df_"+ str(args.discount_factor)
+            model_name_FDE = model_name_FDE_base + '_' + set + '_run_' + str(i) +"_Policy_"+  str(args.lr)  +"_df_"+ str(args.discount_factor)
             args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
 
             tensorboard_name = '../tensorboard/' + set

@@ -151,7 +151,7 @@ class TrajectoryGenerator(nn.Module):
         # torch.manual_seed(72)
         self.obs_len = obs_len
         self.pred_len = pred_len
-
+        self.mean_dist=None
         device = torch.device('cuda', index=self.args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
         # self.action_log_std = (torch.ones(1, action_dim) * log_std).to(device)
         self.action_log_std = nn.Parameter(torch.ones(1, action_dim) * log_std)
@@ -164,7 +164,7 @@ class TrajectoryGenerator(nn.Module):
         # Initialize the fixed part of the noise
         if self.args.pretraining==True:
             self.fixed_noise = get_noise((1,) + self.noise_dim, self.noise_type)    
-            print("AAAAAAAAAAAAAAAAAA")        
+            # print("AAAAAAAAAAAAAAAAAA")        
         else:
             self.register_buffer('fixed_noise', get_noise((1,) + self.noise_dim, self.noise_type))
         # self.pred_len = 1 if args.step_definition=="single" else pred_len
@@ -223,6 +223,7 @@ class TrajectoryGenerator(nn.Module):
         if self.args.randomness_definition=='deterministic':
             z_decoder = get_noise(noise_shape, self.noise_type)
             # print(z_decoder)
+            # print("AAAAAAAAAAAAA")
         elif self.args.randomness_definition=='stochastic':
 
                     dynamic_noise_shape = [seq_start_end.size(0)] + [1] * (len(self.fixed_noise.shape) - 1)
@@ -286,7 +287,8 @@ class TrajectoryGenerator(nn.Module):
             # print(action_mean[0][0])
         # torch.manual_seed(seed)   
         # print(action_mean[0][0])   
-        action = torch.normal(action_mean, 0.05)
+        # print()
+        action = torch.normal(action_mean,action_std)
         # torch.manual_seed(self.args.seed)   
         # print("action",action[0][0])
 

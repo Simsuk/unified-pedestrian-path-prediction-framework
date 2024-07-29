@@ -15,6 +15,60 @@ from irl.utils import (
     l2_loss
 
 )
+import torch
+import sys
+import gc
+from torch.cuda.amp import autocast, GradScaler
+
+scaler = GradScaler()
+
+def get_tensor_info():
+    frame = inspect.currentframe()
+    tensors_info = {}
+    total_size = 0
+
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj):
+                if obj.requires_grad:
+                    for var_name, var_obj in frame.f_back.f_locals.items():
+                        if var_obj is obj:
+                            obj_size = obj.element_size() * obj.nelement()
+                            grad_size = 0 if obj.grad is None else obj.grad.element_size() * obj.grad.nelement()
+                            tensors_info[var_name] = (obj_size, grad_size)
+                            total_size += obj_size + grad_size
+                            break
+            elif hasattr(obj, 'data') and torch.is_tensor(obj.data):
+                if obj.data.requires_grad:
+                    for var_name, var_obj in frame.f_back.f_locals.items():
+                        if var_obj is obj:
+                            obj_size = obj.data.element_size() * obj.data.nelement()
+                            grad_size = 0 if obj.data.grad is None else obj.data.grad.element_size() * obj.data.grad.nelement()
+                            tensors_info[var_name] = (obj_size, grad_size)
+                            total_size += obj_size + grad_size
+                            break
+        except Exception as e:
+            pass  # Some objects might cause exceptions during attribute access
+
+    print("Variables holding tensors that are part of the computational graph:")
+    for name, (obj_size, grad_size) in tensors_info.items():
+        print(f"Variable: {name}, Tensor Size: {obj_size / (1024 ** 2):.2f} MB, Grad Size: {grad_size / (1024 ** 2):.2f} MB")
+    
+    print(f"Total memory used by tensors and their gradients: {total_size / (1024 ** 2):.2f} MB")
+
+def print_memory_summary():
+    print("Memory Summary:")
+    print(torch.cuda.memory_summary(device=None, abbreviated=False))
+def print_tensor_info():
+    # This function prints memory usage for all tensors
+    total_size = 0
+    for obj in gc.get_objects():
+        if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+            obj_size = sys.getsizeof(obj)
+            total_size += obj_size
+            print(f"Tensor {obj.size()} -- Size: {obj_size} bytes")
+    print(f"Total memory used by tensors: {total_size} bytes")
+
 # global log_probs_scene
 def add_noise_to_states(states):
     noise_dim = 2
@@ -124,6 +178,10 @@ def ppo_step(states, states_v, actions, returns, advantages, fixed_log_probs, po
             optimizer_value.zero_grad()
 
             if train:
+                # scaler.scale(value_loss).backward()
+                # scaler.step(optimizer_value)
+                # scaler.update()
+                # scaler
                 value_loss.backward()
                 optimizer_value.step()
 
@@ -131,38 +189,49 @@ def ppo_step(states, states_v, actions, returns, advantages, fixed_log_probs, po
         if args.model=='original':
             log_probs = policy_net.get_log_prob(states, actions).squeeze()
         else:
-           log_probs = policy_net.get_log_prob(states, actions, env,obs_traj_pos=None)
+           log_probs = policy_net.get_log_prob(states, actions, env,obs_traj_pos=None) # for single: log_probs.shape= torch.Size([2220, 1])
         if args.step_definition == 'single':
             pred_len = args.pred_len
             batchsize = math.ceil(states.shape[0] / pred_len)
-            log_probs_reshaped = torch.reshape(log_probs, (pred_len, batchsize)).T  # transpose / dim=0? same but doenst look logically
+            log_probs_reshaped = torch.reshape(log_probs, (pred_len, batchsize)).T  # for single:torch.Size([185, 12])      transpose / dim=0? same but doenst look logically
             log_probs_sum = log_probs_reshaped.sum(dim=1)  # (b, 12, 1)
             
-            log_probs = log_probs_sum
-        ratio = torch.exp(log_probs - fixed_log_probs)
+            log_probs = log_probs_sum.squeeze()
+        ratio = torch.exp(log_probs.squeeze() - fixed_log_probs) # for single they are both (b)
+
         if args.training_algorithm == 'ppo_only':  ##### added this to check ppo without baseline
             advantages = returns
         surr1 = ratio * advantages
         # print("Writing histograms")
-
-
+        torch.cuda.empty_cache()
+        # try:
         surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
-
+        # except torch.cuda.OutOfMemoryError as e:
+        #     print("CUDA out of memory error occurred!")
+        #     get_tensor_info()
+        #     print_memory_summary()
+        #     raise e  # Re-raise the exception after logging the memory usage
         policy_surr = -torch.min(surr1, surr2).mean()                                       #ppo loss tensorboadrd
         optimizer_policy.zero_grad()
-
+        del log_probs
+        # del surr1
+        # del surr2
+        torch.cuda.empty_cache()
         if train:
+            # scaler.scale(policy_surr).backward()
             policy_surr.backward()
             torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 40)
             optimizer_policy.step()
+            # scaler.step(optimizer_policy)
+            # scaler.update()
     # print("EPOCH", epoch)
-    writer.add_scalar('surr2_scalar', surr2.mean(), epoch)
-    writer.add_histogram('surr2', surr2, epoch)
-    writer.add_histogram('surr1', surr1, epoch)
-    writer.add_histogram('ratio', ratio, epoch)
+    # writer.add_scalar('surr2_scalar', surr2.mean(), epoch)
+    # writer.add_histogram('surr2', surr2, epoch)
+    # writer.add_histogram('surr1', surr1, epoch)
+    # writer.add_histogram('ratio', ratio, epoch)
     writer.add_histogram('advantages', advantages, epoch)
-    writer.add_histogram('log_probs', log_probs, epoch)
-    writer.add_scalar('surr1_scalar', surr1.mean(), epoch)
+    # writer.add_histogram('log_probs', log_probs, epoch)
+    # writer.add_scalar('surr1_scalar', surr1.mean(), epoch)
     return policy_surr, value_loss
 
 
@@ -309,54 +378,70 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
 
 
         elif args.step_definition == 'multi':
-            gt = expert 
-            state_reversed=states[0:states.shape[0]]
-            original_shape = (state_reversed.shape[0],args.obs_len, 2)  
-            state_reversed = state_reversed.view(original_shape)
-            inter=state_reversed.permute(1,0,2)
-            model_input = torch.cat((inter[:,:batchsize], env.pred_traj_gt_rel), dim=0)
-            actions_mean, _, _ = policy_net(model_input, env.obs_traj,env.seq_start_end ,0, env.training_step) # torch.Size([12, 185, 2])
-            action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
-            # action_all_[1][2][0]=1.0000e+12
-            # action_all_[5][3][1]=1.0000e+12
-            log_probs = policy_net.get_log_prob(states, action_all_.reshape(-1, 2) , env,obs_traj_pos=None).squeeze()
-            # action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
-            # action_all= action_all_.permute(1, 0, 2).flatten(1, 2) # torch.Size([185, 24])
-            action_all= action_all_.flatten().view(batchsize,env.pred_len*2)
-            state_action = torch.cat((states[:batchsize,: ], action_all), dim=1)  # (b, 16) appended action, discarded first time step
-            loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
-            # # gt
-            l2_loss_rel=(gt - state_action)**2
-            l2_loss_rel=l2_loss_rel.detach()
-            # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
-            l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (env.pred_len,batchsize, 2))
-            l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([12, b, 1])
-            # l2_loss_rel=l2_loss_rel.sum(dim=1)
-            # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
-            log_probs=log_probs.reshape(env.pred_len,batchsize,1)
-            # l2_loss_rel=l2_loss_rel.cumsum(dim=0)
-            # log_probs=log_probs.cumsum(dim=0)
-            l2_loss_rel2= l2_loss_rel.flatten() #torch.reshape(l2_loss_rel, (-1, 2)).squeeze()
-            #####################
-            # action_all_=actions_all[0].view(12, batchsize, 2).permute(1, 0, 2).flatten(1, 2) 
-            # state_action = torch.cat((states[:batchsize,: ], action_all_), dim=1)  # (b, 16) appended action, discarded first time step
-            # loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
-            # # gt
-            # l2_loss_rel=(gt - state_action)**2
-            # l2_loss_rel=l2_loss_rel.detach()
-            # # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
-            # l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (batchsize,env.pred_len, 2))
-            # # l2_loss_rel=
-            # l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([b, 12, 1])
-            # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
-            # l2_loss_rel=torch.reshape(l2_loss_rel, (batchsize*12,))
+            if args.model=='stgat':
+                gt = expert 
+                state_reversed=states[0:states.shape[0]]
+                original_shape = (state_reversed.shape[0],args.obs_len, 2)  
+                state_reversed = state_reversed.view(original_shape)
+                inter=state_reversed.permute(1,0,2)
+                model_input = torch.cat((inter[:,:batchsize], env.pred_traj_gt_rel), dim=0)
+                with torch.no_grad():
+                    actions_mean, _, _ = policy_net(model_input, env.obs_traj,env.seq_start_end ,0, env.training_step) # torch.Size([12, 185, 2])
+                action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
+                # action_all_[1][2][0]=1.0000e+12
+                # action_all_[5][3][1]=1.0000e+12
+                log_probs = policy_net.get_log_prob(states, action_all_.reshape(-1, 2) , env,obs_traj_pos=None).squeeze()
+                # action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
+                # action_all= action_all_.permute(1, 0, 2).flatten(1, 2) # torch.Size([185, 24])
+                action_all= action_all_.flatten().view(batchsize,env.pred_len*2)
+                state_action = torch.cat((states[:batchsize,: ], action_all), dim=1)  # (b, 16) appended action, discarded first time step
+                loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
+                # # gt
+                l2_loss_rel=(gt - state_action)**2
+                l2_loss_rel=l2_loss_rel.detach()
+                # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
+                l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (env.pred_len,batchsize, 2))
+                l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([12, b, 1])
+                # l2_loss_rel=l2_loss_rel.sum(dim=1)
+                # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
+                log_probs_new=log_probs.reshape(env.pred_len,batchsize,1)
+                # l2_loss_rel=l2_loss_rel.cumsum(dim=0) #@@@@@@@@@@@@@@@@@@@@@@
+                # log_probs=log_probs.cumsum(dim=0)
+                l2_loss_rel2= l2_loss_rel.flatten() #torch.reshape(l2_loss_rel, (-1, 2)).squeeze()
+                #####################
+                # action_all_=actions_all[0].view(12, batchsize, 2).permute(1, 0, 2).flatten(1, 2) 
+                # state_action = torch.cat((states[:batchsize,: ], action_all_), dim=1)  # (b, 16) appended action, discarded first time step
+                # loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
+                # # gt
+                # l2_loss_rel=(gt - state_action)**2
+                # l2_loss_rel=l2_loss_rel.detach()
+                # # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
+                # l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (batchsize,env.pred_len, 2))
+                # # l2_loss_rel=
+                # l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([b, 12, 1])
+                # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
+                # l2_loss_rel=torch.reshape(l2_loss_rel, (batchsize*12,))
 
-            ##################
+                ##################
 
-            # log_probs = log_probs.squeeze()
-            returns = calculate_return(l2_loss_rel2, pred_len, batchsize, gamma=args.discount_factor)
+                # log_probs = log_probs.squeeze()
+                returns = calculate_return(l2_loss_rel2, pred_len, batchsize, gamma=args.discount_factor)
+                
+                
+                
+                
+                
+                ##############################################
+                
+                log_probs = policy_net.get_log_prob(states, actions_all[0],env,obs_traj_pos=None)  # (bx12, 1)
+                log_probs = log_probs.squeeze()
+                returns = calculate_return(rewards_all[0], pred_len, batchsize, gamma=args.discount_factor)
+            else:
+                log_probs = policy_net.get_log_prob(states, actions_all[0])  # (b, 1)
+                log_probs = log_probs.squeeze()# (b)
+                returns = calculate_return(rewards_all[0], pred_len, batchsize, gamma=args.discount_factor)
             if (args.training_algorithm == 'baseline' or args.training_algorithm == 'ppo' or args.training_algorithm == 'ppo_only'):       #added if statement
-                states_v = states
+                states_v = states[0:batchsize]
 
         if args.training_algorithm == 'baseline':
             # do reinforce with baseline stuff
@@ -375,8 +460,8 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
             advantages = returns_value - values #return values should be negative
             # print(returns_value.shape)
             advantages = (advantages - advantages.mean()) / advantages.std() # normalize advantages according to ppo
-            policy_loss = -(advantages * log_probs).mean()
-            writer.add_histogram('log_probs', log_probs, epoch)
+            policy_loss = -(advantages * log_probs_new).mean()
+            writer.add_histogram('log_probs', log_probs_new, epoch)
             if counter==2:
                 # print("Logging gradients")
                 log_gradients(policy_net, writer, epoch, prefix="policy_net")  
@@ -409,6 +494,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 # log_probs are posiive
                 #policy_loss is positive
             elif args.model=="stgat":
+                policy_loss = -(returns * log_probs).mean()
                 # log_probs_scene=torch.stack(log_probs_scene)
                 # scene_loss=torch.stack(scene_loss).detach()
                 # print("log_probs_scene", log_probs_scene[0])
@@ -443,16 +529,17 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                     ##TOHLE FUNGURE ALE JE TO SL_MSE_SPG
                     # (12, b, 1)
                     # (1,b,1)
-                    policy_loss=-(l2_loss_rel.sum(dim=0)*log_probs.sum(dim=0)) # SL_MSE_SPG
-                    policy_loss=policy_loss.mean()
+                    # policy_loss=-(l2_loss_rel.sum(dim=0)*log_probs.sum(dim=0)) # SL_MSE_SPG
+                    # policy_loss=policy_loss.mean()
                     # policy_loss=-(l2_loss_rel*log_probs)
                     
                     #####
-                    # log_probs = log_probs.cumsum(dim=1)
+                    # SL-MSE-SPG-SDM/
                     # log_probs=torch.reshape(log_probs, (batchsize*12,))
-                    # policy_loss= (-l2_loss_rel.squeeze()*log_probs_sum) #torch.reshape(-(l2_loss_rel*log_probs), (batchsize, 12)) #torch.reshape(-returns, (batchsize, 12))  #torch.reshape(-(returns*log_probs), (batchsize, 12)) #.view(-1, 12)
+                    # policy_loss= (-l2_loss_rel*log_probs) #torch.reshape(-(l2_loss_rel*log_probs), (batchsize, 12)) #torch.reshape(-returns, (batchsize, 12))  #torch.reshape(-(returns*log_probs), (batchsize, 12)) #.view(-1, 12)
+                    # # policy_loss=policy_loss.sum(dim=0)
                     # policy_loss=policy_loss.mean()
-                    
+                    policy_loss = -(returns.squeeze() * log_probs).mean()
                     ###testing equivalence to SL-MSE-SPG baseline and it works 
                     # log_probs_reshaped = torch.reshape(log_probs, (pred_len, batchsize)).T    #(b,12)
                     # log_probs_sum = log_probs_reshaped.sum(dim=1)                               # (b)
@@ -622,14 +709,15 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 # gt
                 
                 l2_loss_rel=(gt - state_action)**2
+                
                 # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
                 l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (batchsize,env.pred_len, 2))
                 # l2_loss_rel=
-                
+                # l2_loss_rel[1][3][1]=10**10
                 l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([b, 12, 1])
                 l2_loss_rel = l2_loss_rel.cumsum(dim=1)
-                l2_loss_rel=torch.reshape(l2_loss_rel, (batchsize*12,))
-
+                # l2_loss_rel=torch.reshape(l2_loss_rel, (batchsize*12,))
+                l2_loss_rel=l2_loss_rel.squeeze().permute(1,0).reshape(batchsize * 12, 1)
                 # rewards = custom_reward(env,args, states, actions_mean, gt)  # (bx12, 1)
                 returns = calculate_return(l2_loss_rel, pred_len, batchsize, gamma=args.discount_factor)
                 policy_loss = -returns[:batchsize].mean()
@@ -675,7 +763,11 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
         policy_loss.backward()
         optimizer_policy.step()
     if args.model=="stgat":
-        returns=returns.detach()
+        try:
+            returns = returns.detach()
+        except Exception as e:
+            # Handle the exception or pass to silently ignore it
+            pass
         rewards=rewards.detach()
         # Detach the stacked tensor
         policy_loss=policy_loss.detach()

@@ -57,10 +57,11 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                     action_all, _, _ = policy(model_input, obs_traj,seq_start_end ,0, training_step)
                 else:
                     model_input = torch.cat((env.obs_traj_rel, env.pred_traj_gt_rel), dim=0)
-                    seed = time.time_ns()
+                    # seed = time.time_ns()
+                    seed=args.seed
                     action_all = policy.select_action(model_input, obs_traj, seq_start_end ,seed, training_step)
                     actions_mean, _, _ = policy(model_input, obs_traj,env.seq_start_end ,0, training_step)
-
+                    policy.mean_dist=actions_mean
             iterator=iter(action_all)
             # print("action_all",action_all.shape)
         while not done:
@@ -132,33 +133,33 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                         
                         # policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
                         # l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
-                        l2_loss_rel=[]
-                        loss_mask=env.loss_mask[:, args.obs_len :]
-                        original_shape = (state_0.shape[0],8, 2)  
-                        state_reversed = state_0.view(original_shape)
-                        state_reversed=state_reversed.permute(1,0,2)
-                        actions_tensor=torch.stack(actions)
-                        l2_loss_rel.append(
-                        l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="raw")
-                        )
-                        reward_full = -torch.stack(l2_loss_rel, dim=1).squeeze() # list b*[(1)]
-                        # reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
+                        # l2_loss_rel=[]
+                        # loss_mask=env.loss_mask[:, args.obs_len :]
+                        # original_shape = (state_0.shape[0],8, 2)  
+                        # state_reversed = state_0.view(original_shape)
+                        # state_reversed=state_reversed.permute(1,0,2)
+                        # actions_tensor=torch.stack(actions)
+                        # l2_loss_rel.append(
+                        # l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="raw")
+                        # )
+                        # reward_full = -torch.stack(l2_loss_rel, dim=1).squeeze() # list b*[(1)]
+                        # # reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
                         
                         #THIS ONE TO USE
-                        # l2_loss_rel=(gt - state_action)**2 
-                        # reward=-l2_loss_rel.sum(dim=1, keepdim=True)
+                        l2_loss_rel=(gt - state_action)**2 
+                        reward=-l2_loss_rel.sum(dim=1, keepdim=True)
                         
                         # policy_loss=l2_loss_rel.mean()   
                 rewards.append(reward)
 
             if done:
                 action_full = torch.cat(actions, dim=1) # (b, 24) or (b,16) in case of phase 1 and 2
-                
                 if custom_reward is not None:
                     if args.step_definition == 'single' or args.step_definition == 'multi':
-                        gt = ground_truth
+                        
                         # print("GT_agent", gt.shape)
                         if args.model=='stgat':
+                            gt = ground_truth
                             l2_loss_rel=[]
                             loss_mask=env.loss_mask[:, args.obs_len :]
                             original_shape = (state_0.shape[0],8, 2)  
@@ -169,14 +170,16 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                             l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="raw")
                             )
                             reward_full = -torch.stack(l2_loss_rel, dim=1).squeeze() # list b*[(1)]
-                            reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
+                            # reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
                             # print("reward_full2")
                             # reward_full = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
                     
                         elif args.model=='original':
-                            reward_full = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
-
-                elif args.step_definition == 'multi':
+                            if args.step_definition == 'single':
+                                gt = ground_truth
+                                reward_full = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
+                                
+                if args.step_definition == 'multi':
                     rewards = torch.cat(rewards, dim=0)  # (bx12,)
                 states = torch.cat(states, dim=0)        # (bx12, 16)
                 # print_structure_and_dimensions(actions)
@@ -186,9 +189,8 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                 # print("agent")
                 # print("REWARDS", len(rewards), len(reward_full))
                 # print("memory", action_full.shape, actions.shape)
-                memory.push(state_0, action_full, reward_full, states, actions, rewards)   # initial state, 12dim action, reward (single), all intermediate states, all intermediate actions, rewards (multi)
+                memory.push(state_0, action_full, reward_full, states, actions, rewards)   # initial state, 12dim action, reward (single), all intermediate states, all intermediate actions='actions_all, rewards (multi)=rewards_all
                 break
-
             state = next_state
             ts = ts + 1
     return memory

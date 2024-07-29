@@ -8,12 +8,13 @@ import time
 from collections import defaultdict
 from attrdict import AttrDict
 import os
+import re
 metrics = defaultdict(list)
 # Specify the directory you want to switch to
 directory_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/scripts'
 
 # Change the current working directory
-os.chdir(directory_path)
+# os.chdir(directory_path)
 
 from irl.data.loader import data_loader
 from irl.models import Policy
@@ -37,7 +38,7 @@ parser.add_argument('--dataset_name', default='eth', type=str)
 parser.add_argument('--model_path', default="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/PPO_ONLY/superparam_search/lr_iters_10_or_15") # "../models/model_average" "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt", type=str) #../models/model_average
 parser.add_argument('--dset_type', default='test', type=str)
 parser.add_argument('--model_average', default=True, type=bool)
-parser.add_argument('--runs', type=int, default=1, help='number of models to compute average')
+parser.add_argument('--runs', type=int, default=5, help='number of models to compute average')
 parser.add_argument('--prediction_steps', default=None, type=int)
 parser.add_argument('--noise', default=False, type=bool)             # add noise to deterministic models to add stochasticity
 parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
@@ -46,6 +47,7 @@ parser.add_argument('--randomness_definition', default='stochastic',  type=str, 
 
 # STGAT #######################################
 
+parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
 
 parser.add_argument('--log-std', type=float, default=-2.99, metavar='G', help='log std for the policy (default=-0.0)')
 
@@ -113,7 +115,7 @@ parser.add_argument(
 
 
 # additional params
-seeding = 73
+seeding = 0
 
 if seeding is not None:
     torch.manual_seed(seeding)
@@ -126,12 +128,13 @@ def get_policy(args,model,checkpoint):
         _args = AttrDict(checkpoint['args'])
         policy_net = Policy(16, 2, log_std=_args.log_std)
         policy_net.load_state_dict(checkpoint['policy_net_state'])
+        
         policy_net.cuda()
         policy_net.eval()
     elif model=="stgat":
         _args = AttrDict(checkpoint['args'])
-        
         args.seed=_args.seed
+        # _args.pretraining=False
         args.dataset_name=_args.dataset_name
         # print(args)
         n_units = (
@@ -237,8 +240,10 @@ def create_fake_trajectories(env,args,obs_traj_rel, pred_traj_gt_rel,seq_start_e
         for step in range(pred_len):
             if mean_action is False and randomness_definition == 'stochastic':
                 action = policy.select_action(state)
+                
             else:
                 if noise:
+                    print("working")
                     state = add_noise_state(args, state, device)                                          # this is to add noise remove if no worky or make better if worky
                 action, _, _ = policy(state)    #meanaction for deterministic
             fake_traj = torch.cat((fake_traj, action), dim=1)
@@ -251,20 +256,20 @@ def create_fake_trajectories(env,args,obs_traj_rel, pred_traj_gt_rel,seq_start_e
         pred_traj_fake_rel = fake_traj.permute(1, 0, 2)                          # (12, b, 2)
     elif args.model=="stgat":
             # happens only in training_step==3 because only then we generate 12 trajectories
-            
-            # print(model_input.shape)
-            # print("stohcasticity:", randomness_definition)
-            if mean_action==False:
+
+            if mean_action is False and randomness_definition == 'stochastic':
+
                 model_input=torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
 
                 pred_traj_fake_rel  = policy.select_action(model_input, obs_traj_rel,seq_start_end, seed,3)
-                # print("mistake")
+
             else:
-                # obs_traj_rel = add_noise_state(args, obs_traj_rel, device) 
+                if noise:
+                    obs_traj_rel = add_noise_state(args, obs_traj_rel, device)  
                 model_input=torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
                  
                 pred_traj_fake_rel, _, _ = policy(model_input, obs_traj_rel,seq_start_end ,0, 3)  
-                # print("output", pred_traj_fake_rel[0])
+
 
     return pred_traj_fake_rel   # (12, b, 2)
 
@@ -314,7 +319,7 @@ class fake_env():
         self.training_step=training_step
 def main(args):
     if args.model_average:
-        args.model_path ="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/PPO_ONLY/BEST_FINAL_RESULTS/saved_model_ADE_zara2_run_2_Policy_1_length_12.pt"# "../models/model_average" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" #"../models/model_average" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" # 
+        args.model_path ="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE/with_pretrained_without_scene/1v1_12/AGAIN_2_9_making_sure" #"../models/model_average" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" #"../models/model_average" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" # 
         ADE = []
         FDE = []
         minADE = []
@@ -341,27 +346,54 @@ def main(args):
             paths = [args.model_path]
         else:
             paths = []
+    # pattern = re.compile(r"(eth|univ|zara1|zara2|hotel).*(df_(0\.2|0\.6|0\.4|0\.8))")
+    # # pattern = re.compile(r"(eth|univ|zara1|zara2|hotel).*(df_0\.6)")
+
+    # # Group files based on dataset and discount factor
+    # grouped_files = {}
+    # for path in paths:
+    #     match = pattern.search(path)
+    #     if match:
+    #         dataset, discount_factor = match.groups()[:2]
+    #         if dataset in ["hotel"]:  # Only consider paths that contain 'ETH'
+    #             key = (dataset, discount_factor)
+    #             if key not in grouped_files:
+    #                 grouped_files[key] = []
+    #             grouped_files[key].append(path)
+
+    # # Sort and print the grouped files
+    # sorted_paths = []
+    # for key in sorted(grouped_files.keys(), key=lambda x: (x[0], float(x[1].split('_')[1]))):
+    #     grouped_files[key].sort()
+    #     sorted_paths.extend(grouped_files[key]) 
+    #     print(f"Group: {key}")
+    #     for file in grouped_files[key]:
+    #         print(f"  {file}")
+
     env=fake_env()
     print("Evaluating IRL model \n")
     path_counter = 0
+    # sorted_paths=paths
     for path in paths:
         path_counter = path_counter + 1
         # print("PATH", path)
         checkpoint = torch.load(path)
         # checkpoint["policy_net_state"].pop('action_log_std', None)
-       
+
         policy_net = get_policy(args,args.model,checkpoint)
         # print("lr", checkpoint['lr'])
         _args = AttrDict(checkpoint['args'])
-        print("LR", _args.lr)
-        print("EPOCH", checkpoint['epoch'])
-        _args.randomness_definition='deterministic'
-        _args.pretraining=False
+        # print("LR", _args.lr)
+        # print("EPOCH", checkpoint['epoch'])
+        # _args.randomness_definition='stochastic'
+        # _args.pretraining=False
+        # policy_net.args.pretrainig=args.pretraining
         # print("VALUE", _args.learning_rate)
         # print("ppo_clip", _args.ppo_clip)
         # print("optim_value_iternum", _args.optim_value_iternum)
         # print("l2_reg", _args.l2_reg)
         seeding = _args.seed
+        print("SEED", _args.seed)
         # print("SEED", seeding)
         # args.seed= _args.seed
         # if seeding is not None:
@@ -380,7 +412,7 @@ def main(args):
         path = get_dset_path(_args.dataset_name, args.dset_type)
         _, loader = data_loader(_args, path)
         print(_args.randomness_definition)
-        ade, fde = evaluate_irl(env,_args, loader, policy_net, 1, mean_action=True, noise=False, device=device)
+        ade, fde = evaluate_irl(env,_args, loader, policy_net, 1, mean_action=False, noise=False, device=device)
         metrics['ade'].append(ade)
         metrics['fde'].append(fde)
 

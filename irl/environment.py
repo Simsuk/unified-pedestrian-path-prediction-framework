@@ -105,7 +105,9 @@ class Environment:
                 state_action = expert_full[:, i*2:(i*2) + sa_len]   # sliding window of (b,18) for 12 steps
                 expert_state_actions.append(state_action)
             expert_multi = torch.cat(expert_state_actions, dim=0)     #(bx12, 18)
-            # expert = expert_multi
-            expert=expert_full
+            if self.args.model=='original':
+                expert = expert_multi
+            else:
+                expert=expert_full
         return expert
 
