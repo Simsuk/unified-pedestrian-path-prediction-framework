@@ -466,10 +466,58 @@ class Policy(nn.Module):
 
 
 class Discriminator_LSTM(nn.Module):
-    def __init__(self, hidden_size=128, lstm_hidden_size=64, activation='relu'):
+    # def __init__(self, lstm_hidden_size=64, activation='relu'):
+    #     super().__init__()
+    #     # LSTM layer
+    #     self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_hidden_size, batch_first=True)
+
+    #     # Global average pooling
+    #     self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+
+    #     # Define activation function
+    #     self.activation = {
+    #         'tanh': torch.tanh,
+    #         'relu': nn.ReLU(inplace=False),
+    #         'sigmoid': torch.sigmoid
+    #     }.get(activation, nn.ReLU(inplace=False))  # Default to ReLU if unspecified
+
+    #     # Linear layer for final decision
+    #     self.logic = nn.Linear(lstm_hidden_size, 1)
+
+    # def forward(self, x, mask=None):
+    #     # LSTM expects (batch, seq_len, features) but each feature is treated as a sequence
+    #     x = x.unsqueeze(-1)  # Shape: (batch_size, num_features, 1)
+        
+    #     # Apply masking if mask is provided
+    #     if mask is not None:
+    #         # Assuming mask has shape (batch_size, seq_len)
+    #         x = x * mask.unsqueeze(-1)  # Shape: (batch_size, num_features, 1)
+        
+    #     # Pass through LSTM
+    #     x, _ = self.lstm(x)
+
+    #     # Apply the mask again to the LSTM output if necessary
+    #     if mask is not None:
+    #         x = x * mask.unsqueeze(-1)  # Shape: (batch_size, seq_len, lstm_hidden_size)
+        
+    #     # Apply global average pooling across the sequence dimension
+    #     x = x.transpose(1, 2)  # Shape: (batch_size, lstm_hidden_size, seq_len)
+    #     x = self.global_avg_pool(x).squeeze(-1)  # Shape: (batch_size, lstm_hidden_size)
+    #     # x=x.squeeze(-1)
+    #     # Apply activation function
+    #     x = self.activation(x)
+
+    #     # Final linear layer
+    #     x = self.logic(x)
+        
+    #     # Apply sigmoid to get the probability
+    #     prob = torch.sigmoid(x)
+    #     return prob
+
+    def __init__(self, dense_hidden_size=64, activation='relu'):
         super().__init__()
-        # LSTM layer
-        self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_hidden_size, batch_first=True)
+        # Dense layer
+        self.dense = nn.Linear(1, dense_hidden_size)
 
         # Global average pooling
         self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
@@ -482,19 +530,34 @@ class Discriminator_LSTM(nn.Module):
         }.get(activation, nn.ReLU(inplace=False))  # Default to ReLU if unspecified
 
         # Linear layer for final decision
-        self.logic = nn.Linear(lstm_hidden_size, 1)
+        self.logic = nn.Linear(dense_hidden_size, 1)
 
-    def forward(self, x):
-        # LSTM expects (batch, seq_len, features) but each feature is treated as a sequence
+    def forward(self, x, mask=None):
+        # Dense layer expects (batch, seq_len, features) but each feature is treated as a sequence
         x = x.unsqueeze(-1)  # Shape: (batch_size, num_features, 1)
-        x, _ = self.lstm(x)
+
+        # Apply masking if mask is provided
+        if mask is not None:
+            # Assuming mask has shape (batch_size, seq_len)
+            x = x * mask.unsqueeze(-1)  # Shape: (batch_size, num_features, 1)
+
+        # Pass through the dense layer
+        x = self.dense(x)  # Shape: (batch_size, seq_len, dense_hidden_size)
+
+        # Apply the mask again to the dense layer output if necessary
+        if mask is not None:
+            x = x * mask.unsqueeze(-1)  # Shape: (batch_size, seq_len, dense_hidden_size)
 
         # Apply global average pooling across the sequence dimension
-        x = x.transpose(1, 2)  # Shape: (batch_size, 1, num_features)
-        x = self.global_avg_pool(x).squeeze(-1)  # Shape: (batch_size, lstm_hidden_size)
+        x = x.transpose(1, 2)  # Shape: (batch_size, dense_hidden_size, seq_len)
+        x = self.global_avg_pool(x).squeeze(-1)  # Shape: (batch_size, dense_hidden_size)
 
+        # Apply activation function
         x = self.activation(x)
+
+        # Final linear layer
         x = self.logic(x)
+
+        # Apply sigmoid to get the probability
         prob = torch.sigmoid(x)
         return prob
-

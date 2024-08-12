@@ -222,6 +222,8 @@ class TrajectoryGenerator(nn.Module):
         noise_shape = (seq_start_end.size(0),) + self.noise_dim
         if self.args.randomness_definition=='deterministic':
             z_decoder = get_noise(noise_shape, self.noise_type)
+            # dynamic_noise_shape = [seq_start_end.size(0)] + [1] * (len(self.fixed_noise.shape) - 1)
+            # z_decoder = self.fixed_noise.repeat(*dynamic_noise_shape)
             # print(z_decoder)
             # print("AAAAAAAAAAAAA")
         elif self.args.randomness_definition=='stochastic':
@@ -265,7 +267,7 @@ class TrajectoryGenerator(nn.Module):
             # print("action_log_std", action_log_std[0])
             # print("action_std",action_std[0])
         else:
-            first_iter=int(x.shape[0]/env.pred_len)
+            first_iter=int(x.shape[0]/env.pred_len) 
 
             model_input=x[:first_iter]
             original_shape = (model_input.shape[0],env.obs_len, 2)  

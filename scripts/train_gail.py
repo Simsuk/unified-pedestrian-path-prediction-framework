@@ -34,7 +34,7 @@ class Profile:
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 
 from irl.utils import *
-from irl.models import Policy, Discriminator, Value
+from irl.models import Policy, Discriminator, Value, TrajectoryDiscriminator
 from irl.model_stgat import TrajectoryGenerator
 from irl.replay_memory import Memory
 from torch import nn
@@ -48,7 +48,10 @@ import torch.optim as optim
 import gc
 import logging
 import psutil
-from torch.utils.tensorboard import SummaryWriter
+import torch.nn.functional as F
+
+
+from tensorboardX import SummaryWriter #torch.utils.tensorboard
 import psutil
 # torch.cuda.memory.set_per_process_memory_fraction(32 / torch.cuda.get_device_properties(0).total_memory)
 # torch.set_num_threads(32)
@@ -86,9 +89,11 @@ parser.add_argument("--model", default="stgat", help="The learning model method.
 parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
 parser.add_argument("--l2_reg", default=0.0, help="PPO_regularization")
 
+parser.add_argument("--reward", default="window", help="type of reward/action definition, either cumulative or window (rolling window)")
+
 parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
-parser.add_argument('--step_definition', default='multi',  type=str, help='either single or multi')
-parser.add_argument('--loss_definition', default='l2',  type=str, help='either discriminator or l2')
+parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
+parser.add_argument('--loss_definition', default='discriminator',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
 parser.add_argument('--discount_factor', type=float, default=1, help='discount factor gamma, value between 0.0 and 1.0')
 parser.add_argument('--optim_value_iternum', type=int, default=1, help='minibatch size')
@@ -97,8 +102,8 @@ parser.add_argument('--training_algorithm', default='reinforce',  type=str, help
 parser.add_argument('--trainable_noise', type=bool, default=False, help='add a noise to the input during training')
 parser.add_argument('--ppo-iterations', type=int, default=10, help='number of ppo iterations (default=1)')
 parser.add_argument('--ppo-clip', type=float, default=0.2, help='amount of ppo clipping (default=0.2)')
-parser.add_argument('--learning-rate', type=float, default=0.00001, metavar='G', help='learning rate (default: 1e-5)')
-parser.add_argument('--batch_size', default=4, type=int, help='number of sequences in a batch (can be multiple paths)')
+parser.add_argument('--learning-rate', type=float, default=0.001, metavar='G', help='learning rate (default: 1e-5)')
+parser.add_argument('--batch_size', default=64, type=int, help='number of sequences in a batch (can be multiple paths)')
 parser.add_argument('--log-std', type=float, default=-2.99, metavar='G', help='log std for the policy (default=-0.0)')
 parser.add_argument('--num_epochs', default=400, type=int, help='number of times the model sees all data')
 
@@ -123,8 +128,8 @@ parser.add_argument('--loader_num_workers', default=16, type=int, help='number c
 parser.add_argument('--skip', default=1, type=int, help='used for skipping sequences (default=1)')
 parser.add_argument('--delim', default='\t', help='how to read the data text file spacing')
 parser.add_argument('--l2_loss_weight', default=1, type=float, help='l2 loss multiplier (default=0)')
-parser.add_argument('--use_gpu', default=1, type=int)                   # use gpu, if 0, use cpu only
-parser.add_argument('--gpu-index', type=int, default=1, metavar='N')
+parser.add_argument('--use_gpu', default=0, type=int)                   # use gpu, if 0, use cpu only
+parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
 parser.add_argument('--load_saved_model', default=None, metavar='G', help='path of pre-trained model')
 
 #STGAT ==========================================================
@@ -159,18 +164,26 @@ parser.add_argument(
 )
 parser.add_argument("--graph_lstm_hidden_size", default=32, type=int)
 parser.add_argument(
-    "--dropout", type=float, default=0, help="Dropout rate (1 - keep probability)."
+    "--dropout", type=float, default=0.0, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument(
     "--alpha", type=float, default=0.2, help="Alpha for the leaky_relu."
 )
 parser.add_argument(
     "--lr",
-    default=  1e-4, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    default=  0.00011557805848539156, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
     type=float,
     metavar="LR",
     help="initial learning rate",
     dest="lr",
+)
+parser.add_argument(
+    "--lr_disc",
+    default=  0.0028904143728086026, #0.00058904143728086026, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    type=float,
+    metavar="LR-disc",
+    help="initial learning rate of discriminator",
+    dest="lr_disc",
 )
 parser.add_argument(
     "--start-epoch",
@@ -182,7 +195,7 @@ parser.add_argument(
 
 parser.add_argument("--best_k", default=1, type=int)
 parser.add_argument("--print_every", default=10, type=int)
-parser.add_argument("--gpu_num", default="1", type=str)
+parser.add_argument("--gpu_num", default="1=0", type=str)
 
 parser.add_argument(
     "--resume",
@@ -195,6 +208,11 @@ best_ade = 100
 # ================================================================
 
 args = parser.parse_args()
+def initialize_weights(module):
+    if isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight, gain=0.001)  # gain=0.01 to make weights smaller
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
 
 def log_memory_usage(message):
     memory = psutil.Process().memory_info().rss / (1024 * 1024)  # Memory in MB
@@ -257,6 +275,7 @@ def main_loop(writer):
         log_std=args.log_std,
         action_dim=2
         )
+        policy_net.apply(initialize_weights)
         policy_net.cuda()
 
         global best_ade
@@ -295,19 +314,26 @@ def main_loop(writer):
                 # )
         writer.close()
     disc_single = Discriminator(40) #40
-    disc_multi = Discriminator(18)
+    disc_multi = Discriminator_LSTM() #Discriminator(18)
     
     if args.step_definition == 'multi':
         discriminator_net = disc_multi
+        discriminator_net.apply(initialize_weights)
     elif args.step_definition == 'single':
         if args.model=='original':
          discriminator_net = disc_single      #changed from single as experiment
         elif args.model=='stgat':
             if   args.disc_type=='original':
-                # discriminator_net = Discriminator(32)
-                discriminator_early = Discriminator(32)  # Assuming this uses input size 32
-                discriminator_late = Discriminator(40)   # Modify according to your needs
-                discriminator_net=Discriminator_LSTM()
+                # discriminator_early = Discriminator(32)  # Assuming this uses input size 32
+                # discriminator_late = Discriminator(40)   # Modify according to your needs
+                discriminator_net=Discriminator(40) # Discriminator_LSTM()
+                num_inputs = 2  # traj_dim, typically 2 for (x, y) coordinates
+                seq_len = 20  # Sequence length (assuming input is reshaped to have 20 time steps)
+                hidden_dim = 128  # Hidden size of LSTM (smaller than before)
+
+                # discriminator_net = TrajectoryDiscriminator(num_inputs, seq_len, hidden_dim)
+
+                discriminator_net.apply(initialize_weights)
        # You might want to move these definitions to a place where they can be initialized with appropriate device settings:
 
                 print("bla")
@@ -375,9 +401,9 @@ def main_loop(writer):
 
     """optimizers"""
     if args.model=="original" :
-        policy_opt = torch.optim.Adam(policy_net.parameters(), lr=args.learning_rate)
-        disc_lr = args.learning_rate
-        discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=disc_lr)
+        policy_opt = torch.optim.Adam(policy_net.parameters(), lr=args.learning_rate, betas=(0.5, 0.99))
+        disc_lr = args.lr_disc
+        discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=disc_lr, betas=(0.5, 0.99))
     elif args.model=="stgat":
         policy_opt = optim.Adam(
         [
@@ -392,7 +418,7 @@ def main_loop(writer):
         lr= args.lr ,#args.lr,
         )
         if args.disc_type=='original':
-            disc_lr = 1e-2 #args.learning_rate
+            disc_lr = args.lr_disc
             discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=disc_lr)
             # discriminator_early = torch.optim.Adam(discriminator_early.parameters(), lr=disc_lr)
             # discriminator_opt = torch.optim.Adam(discriminator_late.parameters(), lr=disc_lr)
@@ -496,13 +522,19 @@ def main_loop(writer):
         # print(args)
         state_action = torch.cat((state, action), dim=1)  # (b, 16) + (b, 24) = (b, 40)
         if args.loss_definition == 'discriminator':
-            if args.model=='original' or args.disc_type=='original':
+            if args.model=='original' and args.disc_type=='original':
                 disc_out = discriminator_net(state_action)
             elif args.model=='stgat':
-                if env.training_step == 1 or env.training_step == 2:
-                    disc_out = discriminator_net(state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
-                else:
-                    disc_out = discriminator_net(state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)
+                if args.step_definition=='single':
+                    if env.training_step == 1 or env.training_step == 2:
+                        disc_out = discriminator_net(state_action)
+                    else:
+                        disc_out = discriminator_net(state_action)
+                else:     
+                       state_action =torch.cat((state, action), dim=1)
+                       padded_tensor = F.pad(state_action, (0, 40-state_action.shape[1])) # padds to size 40
+                       mask = padded_tensor == 0  
+                       disc_out = discriminator_net(padded_tensor, mask)
             labels = torch.ones_like(disc_out)
             expert_reward = -custom_reward(disc_out, labels)  # pytorch nn.BCELoss() already has a -
 
@@ -552,7 +584,7 @@ def main_loop(writer):
 
 
     """update parameters function"""
-    def update_params(args, batch, expert, train):
+    def update_params(args, batch, expert, train, epoch):
 
         loss_policy = 0
         loss_discriminator = 0
@@ -571,17 +603,18 @@ def main_loop(writer):
 
                     # print(" expert_state_actions, pred_state_actions",  expert_state_actions.shape, pred_state_actions.shape)
                 elif args.step_definition == 'multi':
-                    expert_state_actions = expert   # (bx12, 18)
-                   
-                    pred_state_actions = torch.cat([states_all[0], actions_all[0]], dim=1)  #(bx12, 18)
+                    expert_state_actions = expert   # (bx12, 40)
+                    pred_state_actions=env.pred_state_actions  # (bx12, 40)
+                    
+                    # pred_state_actions = torch.cat([states_all[0], actions_all[0]], dim=1)  #(bx12, 18)
                     #state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
-                discriminator_loss = discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train)
+                discriminator_loss = discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train, epoch, writer)
                 loss_discriminator += discriminator_loss
 
         """perform policy (REINFORCE) update"""
         for _ in range(args.policy_steps):
             # for single actions_all[0].shape= torch.Size([2220, 2])
-            policy_loss, value_loss = reinforce_step(args, env, policy_net, policy_opt, expert_reward, states_all, actions_all,
+            policy_loss, value_loss = reinforce_step(args, env, policy_net, policy_opt, expert_reward, states, states_all, actions_all,
                                          rewards_all, rewards, expert, train, value_net, value_opt, value_crt, training_step=training_step, epoch=epoch, writer=writer)
 
             loss_policy += policy_loss
@@ -629,7 +662,7 @@ def main_loop(writer):
                     
                     expert = env.collect_expert()                               # the expert is a batch of full ground truth trajectories
 
-                    policy_loss, discriminator_loss, value_loss = update_params(args, batch, expert, train)
+                    policy_loss, discriminator_loss, value_loss = update_params(args, batch, expert, train, epoch)
                     loss_policy += policy_loss
                     del policy_loss
                     loss_discriminator += discriminator_loss
@@ -669,7 +702,7 @@ def main_loop(writer):
                         batch = agent.collect_samples(mean_action=mean_action)
                         expert = env.collect_expert()
 
-                        policy_loss_val, discriminator_loss_val, value_loss_val = update_params(args, batch, expert, train)
+                        policy_loss_val, discriminator_loss_val, value_loss_val = update_params(args, batch, expert, train, epoch)
                         loss_policy_val += policy_loss_val
                         loss_discriminator_val += discriminator_loss_val
                         loss_value_val += value_loss_val
@@ -831,7 +864,7 @@ def cal_ade_fde(pred_traj_gt, pred_traj_fake):
 
 #===============================================================
 if args.all_datasets:
-    datasets = ['eth']  # ['eth', 'hotel', 'zara1', 'zara2', 'univ']
+    datasets =['eth', 'hotel', 'zara1', 'zara2', 'univ']
 else:
     datasets = [args.dataset_name]
 
@@ -900,7 +933,7 @@ if args.multiple_executions:
             elif args.model=="stgat":
                  print("Dataset: " + set + ". Script execution number: " + str(i)+ " Best k:"+ str(args.best_k))
             main_loop(writer)
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             gc.collect()
 else:
         # with Profile() as profile:

@@ -19,6 +19,16 @@ import torch
 import sys
 import gc
 from torch.cuda.amp import autocast, GradScaler
+def get_all_tensors():
+    all_objects = gc.get_objects()
+    tensors = [obj for obj in all_objects if torch.is_tensor(obj)]
+    return tensors
+
+def detach_all_tensors(tensors):
+    for tensor in tensors:
+        tensor.detach()
+
+# Example usage
 
 scaler = GradScaler()
 
@@ -89,12 +99,12 @@ def process_task(args,env, discriminator_net, discriminator_opt, discriminator_c
         output = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
         return output.cpu()
 
-def discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train):
+def discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train, epoch, writer):
     if args.model=='original':
         
         g_o = discriminator_net(pred_state_actions)
         e_o = discriminator_net(expert_state_actions)
-
+        # print(e_o.shape)
     elif args.model=='stgat':
         if env.training_step == 1 or env.training_step == 2:
             first_16 = expert_state_actions[:, :16]
@@ -125,6 +135,9 @@ def discriminator_step(args,env, discriminator_net, discriminator_opt, discrimin
                     # print("pred_state_actions", pred_state_actions.shape)
                     g_o = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # generated/policy scores
                     e_o = discriminator_net(expert_state_actions, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # expert scores
+    # writer.add_histogram('pred_state_actions', pred_state_actions.detach().cpu().numpy().astype(np.float32),  global_step=epoch)
+    # writer.add_histogram('g_o', g_o.detach().cpu().numpy().astype(np.float32),  global_step=epoch)
+    # writer.add_histogram('e_o', e_o.detach().cpu().numpy().astype(np.float32),  global_step=epoch)
     # g_o.shape=torch.Size([706, 1])
     
 
@@ -133,11 +146,27 @@ def discriminator_step(args,env, discriminator_net, discriminator_opt, discrimin
     e_o_l = torch.ones((expert_state_actions.shape[0], 1), device=device)
     d_loss_policy = discriminator_crt(g_o, g_o_l)  # fake
     d_loss_expert = discriminator_crt(e_o, e_o_l)  # real
+    l2_reg = torch.tensor(0., requires_grad=True)
     discrim_loss = d_loss_policy + d_loss_expert
+    for param in discriminator_net.parameters():
+        if param.requires_grad:
+            l2_reg = l2_reg + torch.norm(param, 2)
+    lambda_l2=0.01 # 0.3 for GAN
+    discrim_loss = discrim_loss + lambda_l2 * l2_reg
+    l2_reg=l2_reg.detach()
+    del l2_reg
     discriminator_opt.zero_grad()
-
+    max_abs_gradient = 0.0
+    
     if train:
         discrim_loss.backward()
+        # torch.nn.utils.clip_grad_norm_(discriminator_net.parameters(), max_norm=0.5)  
+        for param in discriminator_net.parameters():
+            if param.grad is not None:
+                max_abs_gradient = max(max_abs_gradient, torch.max(torch.abs(param.grad)).item())
+                max_abs_weight = max(max_abs_gradient, torch.max(torch.abs(param.data)).item())
+                writer.add_scalar('Max_Absolute_Gradient', max_abs_gradient, global_step=epoch)
+                writer.add_scalar('Max_Absolute_Weight', max_abs_weight, global_step=epoch)
         discriminator_opt.step()
     e_o=e_o.detach()
     g_o=g_o.detach()
@@ -235,9 +264,11 @@ def ppo_step(states, states_v, actions, returns, advantages, fixed_log_probs, po
     return policy_surr, value_loss
 
 
-def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, states_all, actions_all, rewards_all, rewards, expert, train, value_net=None, optimizer_value=None, value_crt=None, training_step=3, epoch=0, writer=None, log_gradients=None, counter=1):    #probs rename to a more general name
-
-    states = states_all[0]      # (bx12, 16) batch of combined 12step (intermediate black box) states
+def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, states,states_all, actions_all, rewards_all, rewards, expert, train, value_net=None, optimizer_value=None, value_crt=None, training_step=3, epoch=0, writer=None, log_gradients=None, counter=1):    #probs rename to a more general name
+    if args.reward=='cumulative' and args.model=='stgat' and args.step_definition=='multi':
+        states=states.repeat(12, 1)
+    else:
+        states = states_all[0]      # (bx12, 16) batch of combined 12step (intermediate black box) states
     pred_len = args.pred_len
     obs_len=args.obs_len
     
@@ -251,7 +282,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
     value_loss = 0
 
     if args.randomness_definition == 'stochastic':
-        if args.model=="stgat":
+        if args.model=="stgat" and args.step_definition=='single':
             obs_traj=None
             # print("USED TRAINING STEP",training_step )
             ###################
@@ -264,12 +295,12 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 actions_mean, _, _ = policy_net(states[0:batchsize], obs_traj,env.seq_start_end ,1, training_step)
                 
             else: 
-                state_reversed=states[0:batchsize]
+                state_reversed=states[0:batchsize] # [bX12, 16]
                 # print("state_reversed",state_reversed.shape)
                 original_shape = (state_reversed.shape[0],args.obs_len, 2)  
                 # print("state_reversed",state_reversed.shape)
                 state_reversed = state_reversed.view(original_shape)
-                inter=state_reversed.permute(1,0,2)
+                inter=state_reversed.permute(1,0,2) # [b,8,2]
                 # print("shapes", inter.shape, env.pred_traj_gt_rel.shape)
                 model_input = torch.cat((inter, env.pred_traj_gt_rel), dim=0)
                 # print("MODEL INPUT", model_input.shape)
@@ -324,18 +355,18 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 log_probs_scene= [] #torch.empty(0).to(states_part)
                 policy_loss = torch.zeros(1).to(states_part) # list([(b)])
                 # l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
-                for start, end in env.seq_start_end.data:
-                    # _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
-                    # #_l2_loss_rel.shape[scene_trajectories,1]
-                    # _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
-                    # # _l2_loss_rel = torch.min(_l2_loss_rel) / (
-                    # #     (pred_traj_fake_rel.shape[0]) * (end - start)
-                    # )                       # average per pedestrian per scene
-                    _log_probs_sum= torch.narrow(log_probs_sum, 0, start, end - start)
-                    _log_probs_scene=torch.sum(_log_probs_sum, dim=0)
-                    log_probs_scene.append(_log_probs_scene) #torch.cat((log_probs_scene, _log_probs_scene), 0)
+                # for start, end in env.seq_start_end.data:
+                #     # _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end - start)
+                #     # #_l2_loss_rel.shape[scene_trajectories,1]
+                #     # _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)  # [20]
+                #     # # _l2_loss_rel = torch.min(_l2_loss_rel) / (
+                #     # #     (pred_traj_fake_rel.shape[0]) * (end - start)
+                #     # )                       # average per pedestrian per scene
+                #     _log_probs_sum= torch.narrow(log_probs_sum, 0, start, end - start)
+                #     _log_probs_scene=torch.sum(_log_probs_sum, dim=0)
+                #     log_probs_scene.append(_log_probs_scene) #torch.cat((log_probs_scene, _log_probs_scene), 0)
 
-                    # scene_loss.append(_l2_loss_rel)#torch.cat((scene_loss, _l2_loss_rel), 0)
+                #     # scene_loss.append(_l2_loss_rel)#torch.cat((scene_loss, _l2_loss_rel), 0)
                     
                     
             elif args.model=="stgat" and (training_step==1 or training_step==2):
@@ -379,60 +410,59 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
 
         elif args.step_definition == 'multi':
             if args.model=='stgat':
-                gt = expert 
-                state_reversed=states[0:states.shape[0]]
-                original_shape = (state_reversed.shape[0],args.obs_len, 2)  
-                state_reversed = state_reversed.view(original_shape)
-                inter=state_reversed.permute(1,0,2)
-                model_input = torch.cat((inter[:,:batchsize], env.pred_traj_gt_rel), dim=0)
-                with torch.no_grad():
-                    actions_mean, _, _ = policy_net(model_input, env.obs_traj,env.seq_start_end ,0, env.training_step) # torch.Size([12, 185, 2])
-                action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
-                # action_all_[1][2][0]=1.0000e+12
-                # action_all_[5][3][1]=1.0000e+12
-                log_probs = policy_net.get_log_prob(states, action_all_.reshape(-1, 2) , env,obs_traj_pos=None).squeeze()
+                # gt = expert 
+                # state_reversed=states[0:states.shape[0]]
+                # original_shape = (state_reversed.shape[0],args.obs_len, 2)  
+                # state_reversed = state_reversed.view(original_shape)
+                # inter=state_reversed.permute(1,0,2)
+                # model_input = torch.cat((inter[:,:batchsize], env.pred_traj_gt_rel), dim=0)
+                # with torch.no_grad():
+                #     actions_mean, _, _ = policy_net(model_input, env.obs_traj,env.seq_start_end ,0, env.training_step) # torch.Size([12, 185, 2])
                 # action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
-                # action_all= action_all_.permute(1, 0, 2).flatten(1, 2) # torch.Size([185, 24])
-                action_all= action_all_.flatten().view(batchsize,env.pred_len*2)
-                state_action = torch.cat((states[:batchsize,: ], action_all), dim=1)  # (b, 16) appended action, discarded first time step
-                loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
-                # # gt
-                l2_loss_rel=(gt - state_action)**2
-                l2_loss_rel=l2_loss_rel.detach()
-                # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
-                l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (env.pred_len,batchsize, 2))
-                l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([12, b, 1])
-                # l2_loss_rel=l2_loss_rel.sum(dim=1)
-                # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
-                log_probs_new=log_probs.reshape(env.pred_len,batchsize,1)
-                # l2_loss_rel=l2_loss_rel.cumsum(dim=0) #@@@@@@@@@@@@@@@@@@@@@@
-                # log_probs=log_probs.cumsum(dim=0)
-                l2_loss_rel2= l2_loss_rel.flatten() #torch.reshape(l2_loss_rel, (-1, 2)).squeeze()
-                #####################
-                # action_all_=actions_all[0].view(12, batchsize, 2).permute(1, 0, 2).flatten(1, 2) 
-                # state_action = torch.cat((states[:batchsize,: ], action_all_), dim=1)  # (b, 16) appended action, discarded first time step
+                # # action_all_[1][2][0]=1.0000e+12
+                # # action_all_[5][3][1]=1.0000e+12
+                # log_probs = policy_net.get_log_prob(states, action_all_.reshape(-1, 2) , env,obs_traj_pos=None).squeeze()
+                # # action_all_ = policy_net.select_action(model_input, obs_traj, env.seq_start_end , args.seed, training_step)
+                # # action_all= action_all_.permute(1, 0, 2).flatten(1, 2) # torch.Size([185, 24])
+                # action_all= action_all_.flatten().view(batchsize,env.pred_len*2)
+                # state_action = torch.cat((states[:batchsize,: ], action_all), dim=1)  # (b, 16) appended action, discarded first time step
                 # loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
-                # # gt
+                # # # gt
                 # l2_loss_rel=(gt - state_action)**2
                 # l2_loss_rel=l2_loss_rel.detach()
                 # # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
-                # l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (batchsize,env.pred_len, 2))
-                # # l2_loss_rel=
-                # l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([b, 12, 1])
-                # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
-                # l2_loss_rel=torch.reshape(l2_loss_rel, (batchsize*12,))
+                # l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (env.pred_len,batchsize, 2))
+                # l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([12, b, 1])
+                # # l2_loss_rel=l2_loss_rel.sum(dim=1)
+                # # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
+                # log_probs_new=log_probs.reshape(env.pred_len,batchsize,1)
+                # # l2_loss_rel=l2_loss_rel.cumsum(dim=0) #@@@@@@@@@@@@@@@@@@@@@@
+                # # log_probs=log_probs.cumsum(dim=0)
+                # l2_loss_rel2= l2_loss_rel.flatten() #torch.reshape(l2_loss_rel, (-1, 2)).squeeze()
+                # #####################
+                # # action_all_=actions_all[0].view(12, batchsize, 2).permute(1, 0, 2).flatten(1, 2) 
+                # # state_action = torch.cat((states[:batchsize,: ], action_all_), dim=1)  # (b, 16) appended action, discarded first time step
+                # # loss_mask=env.loss_mask[:, args.obs_len :] # take the ground truth of the correct timestep
+                # # # gt
+                # # l2_loss_rel=(gt - state_action)**2
+                # # l2_loss_rel=l2_loss_rel.detach()
+                # # # l2_loss_rel_mod=l2_loss_rel[:batchsize,16: ]
+                # # l2_loss_rel=torch.reshape(l2_loss_rel[:, 16:], (batchsize,env.pred_len, 2))
+                # # # l2_loss_rel=
+                # # l2_loss_rel=-l2_loss_rel.sum(dim=2, keepdim=True)#([b, 12, 1])
+                # # l2_loss_rel = l2_loss_rel.cumsum(dim=1)
+                # # l2_loss_rel=torch.reshape(l2_loss_rel, (batchsize*12,))
 
                 ##################
 
                 # log_probs = log_probs.squeeze()
-                returns = calculate_return(l2_loss_rel2, pred_len, batchsize, gamma=args.discount_factor)
+                # returns = calculate_return(l2_loss_rel2, pred_len, batchsize, gamma=args.discount_factor)
                 
                 
                 
                 
                 
                 ##############################################
-                
                 log_probs = policy_net.get_log_prob(states, actions_all[0],env,obs_traj_pos=None)  # (bx12, 1)
                 log_probs = log_probs.squeeze()
                 returns = calculate_return(rewards_all[0], pred_len, batchsize, gamma=args.discount_factor)
@@ -494,7 +524,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                 # log_probs are posiive
                 #policy_loss is positive
             elif args.model=="stgat":
-                policy_loss = -(returns * log_probs).mean()
+                # policy_loss = -(returns * log_probs).mean()
                 # log_probs_scene=torch.stack(log_probs_scene)
                 # scene_loss=torch.stack(scene_loss).detach()
                 # print("log_probs_scene", log_probs_scene[0])
@@ -566,6 +596,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
 
                 rewards = custom_reward(env,args, states_part, actions_part, gt)  # (610, 1) =(b,1)            
                 policy_loss = -rewards.mean()  # tensor(float)
+                returns=rewards
                 # actions_mean (8,b,2)
                 # actions_part (b,16)
                 # states_part (b,16)
@@ -587,6 +618,7 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                         actions_part = actions_part.permute(1, 0, 2).flatten(1, 2)
                         rewards = custom_reward(env,args, states_part, actions_part, gt)  # (610, 1) =(b,1)            
                         policy_loss_batch = -rewards
+                        returns=rewards
                         l2_loss_rel.append(policy_loss_batch)
                         # policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
                         # # print("Original l2_loss_rel", len(l2_loss_rel), l2_loss_rel[0].shape)
@@ -600,7 +632,9 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
                         #     # (end - start)
                         #     # )                       # average per pedestrian per scene
                         #     policy_loss += _l2_loss_rel.squeeze()
-                        policy_loss= policy_loss_batch.mean() #policy_loss/(len(env.seq_start_end.data)-1)     
+                        policy_loss= policy_loss_batch.mean() #policy_loss/(len(env.seq_start_end.data)-1) 
+                        policy_loss_batch=policy_loss_batch.detach()    
+                        l2_loss_rel=l2_loss_rel.detach()
                     # actions_mean (12,b,2)
                     # pred_traj_fake_rel (12,b,2)
                     # states_part (b,16)
@@ -763,15 +797,23 @@ def reinforce_step(args, env, policy_net, optimizer_policy, custom_reward, state
         policy_loss.backward()
         optimizer_policy.step()
     if args.model=="stgat":
-        try:
-            returns = returns.detach()
-        except Exception as e:
-            # Handle the exception or pass to silently ignore it
-            pass
+        # tensors = get_all_tensors()
+        # # print(f"Found {len(tensors)} tensors in memory.")
+        # detach_all_tensors(tensors)
+        returns = returns.detach()
         rewards=rewards.detach()
         # Detach the stacked tensor
         policy_loss=policy_loss.detach()
-        actions_mean=actions_mean.detach()
+        # actions_mean=actions_mean.detach()
+        try:
+            returns = returns.detach()
+            rewards=rewards.detach()
+            # Detach the stacked tensor
+            policy_loss=policy_loss.detach()
+            actions_mean=actions_mean.detach()
+        except Exception as e:
+            # Handle the exception or pass to silently ignore it
+            pass
         if args.loss_definition!="discriminator" and args.step_definition!='multi' :
             pred_traj_fake_rel=pred_traj_fake_rel.detach()
     # print("acion_mean", actions_mean)

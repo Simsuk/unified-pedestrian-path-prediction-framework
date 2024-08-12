@@ -29,12 +29,14 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
     with torch.no_grad():
         state, seq_start_end,obs_traj_rel  = env.reset()             # take new initial state (observation) of shape (b, 16)
         state_0 = state.clone()
+        env.mask_disc=[]
         obs_traj=None
         bs = state.shape[0]             # batch size
         # print("BATCH SIZE", bs)
         rewards = []
         states = []
         actions = []
+        env.pred_state_actions=[]
         reward_full = torch.zeros(bs)   #(b,) of zeros
         ground_truth = env.collect_expert()   # (b,40) if single step, (bx12,18) if multistep
         ts = 0          # timestep for selecting correct ground truth
@@ -87,67 +89,83 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
             # print("STATES", state.shape)
             actions.append(action)
             states.append(state)
-
+            state_action =torch.cat((state, action), dim=1)
+            padded_tensor = F.pad(state_action, (0, 40-state_action.shape[1])) 
+            mask = padded_tensor == 0  
+            env.mask_disc.append(mask)
+            env.pred_state_actions.append(padded_tensor)
             next_state, reward, done, = env.step(state, action)
             # print("Agent_reward", reward.shape) #should be torch.Size([b, 1])
             if custom_reward is not None:
                 if args.step_definition == 'multi':
-                    gt = ground_truth[ts * bs:(ts + 1) * bs, :] # take the ground truth of the correct timestep
+                     # take the ground truth of the correct timestep
                     if args.model=='original':
+                        gt = ground_truth[ts * bs:(ts + 1) * bs, :]
                         reward = torch.squeeze(custom_reward(env,args, state, action, gt), dim=1) #[b,]
-                    elif args.model=='stgat':
-                        # gt = ground_truth[ts * bs:(ts + 1) * bs, :]
+                    elif args.model=='stgat' and args.loss_definition=='discriminator':
+                        gt= ground_truth[:bs, :(args.obs_len+ts+1)*2]
+                        reward = torch.squeeze(custom_reward(env,args, state, action, gt), dim=1)
+                    elif args.model=='stgat' and args.loss_definition=='l2':
+                        if args.reward=='cumulative':
+                            state_action = torch.cat((state, action), dim=1)
+                            gt=ground_truth[:bs, :(args.obs_len+ts+1)*2]
+                            l2_loss_rel=(gt - state_action)**2 
+                            reward=-l2_loss_rel.sum(dim=1, keepdim=True)
+                        else:
+                            # gt = ground_truth[ts * bs:(ts + 1) * bs, :]
                             #                         actions_mean, _, _ = policy_net(model_input, obs_traj,env.seq_start_end ,0, training_step)
-                        # pred_traj_fake_rel = torch.reshape(actions_mean, (pred_len, batchsize, 2))
-                        state_action = torch.cat((state, action), dim=1)  # (b, 16) appended action, discarded first time step
-                        loss_mask=env.loss_mask[:, args.obs_len :]
-                        gt = ground_truth[:, :state_action.shape[1]] # take the ground truth of the correct timestep
-                        ##########################
-                        # THIS REWARD IS USELESS Do NOT USE
-                        # correct reward is calculated inside the update_parameters.py
-                        
-                        ###############
-                        # original_shape = (states_part.shape[0],8, 2)  
-                        # state_reversed = states_part.view(original_shape)
-                        # state_reversed=state_reversed.permute(1,0,2)
-                        # l2_loss_rel=[]
-                        ##################
-                        
-                        # l2_loss_rel2=[]
-                        # loss_mask=env.loss_mask[:, args.obs_len :]
-                        # original_shape = (state_0.shape[0],8, 2)  
-                        # state_reversed = state_0.view(original_shape)
-                        # state_reversed=state_reversed.permute(1,0,2)
-                        # actions_tensor=torch.stack(actions)
-                        # l2_loss_rel2=l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="full") #[b,12] 
-                        
-                        
-                        
-                        ####################
-                        # l2_loss_rel.append(
-                        # l2_loss(state_action,  gt, loss_mask, mode="raw")
-                        # )
-                        # l2_loss_rel.shape= [b,18]
-                        # gt [b,18]
-                        # state_action [b,18]
-                        
-                        # policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
-                        # l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
-                        # l2_loss_rel=[]
-                        # loss_mask=env.loss_mask[:, args.obs_len :]
-                        # original_shape = (state_0.shape[0],8, 2)  
-                        # state_reversed = state_0.view(original_shape)
-                        # state_reversed=state_reversed.permute(1,0,2)
-                        # actions_tensor=torch.stack(actions)
-                        # l2_loss_rel.append(
-                        # l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="raw")
-                        # )
-                        # reward_full = -torch.stack(l2_loss_rel, dim=1).squeeze() # list b*[(1)]
-                        # # reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
-                        
-                        #THIS ONE TO USE
-                        l2_loss_rel=(gt - state_action)**2 
-                        reward=-l2_loss_rel.sum(dim=1, keepdim=True)
+                            # pred_traj_fake_rel = torch.reshape(actions_mean, (pred_len, batchsize, 2))
+                            state_action = torch.cat((state, action), dim=1)  # (b, 16) appended action, discarded first time step
+                            loss_mask=env.loss_mask[:, args.obs_len :]
+                            gt = ground_truth[ts * bs:(ts + 1) * bs, :]
+                            l2_loss_rel=(gt - state_action)**2 
+                            reward=-l2_loss_rel.sum(dim=1, keepdim=True)
+                            # gt = ground_truth[:, :state_action.shape[1]] # take the ground truth of the correct timestep
+                            ##########################
+                            # THIS REWARD IS USELESS Do NOT USE
+                            # correct reward is calculated inside the update_parameters.py
+                            
+                            ###############
+                            # original_shape = (states_part.shape[0],8, 2)  
+                            # state_reversed = states_part.view(original_shape)
+                            # state_reversed=state_reversed.permute(1,0,2)
+                            # l2_loss_rel=[]
+                            ##################
+                            
+                            # l2_loss_rel2=[]
+                            # loss_mask=env.loss_mask[:, args.obs_len :]
+                            # original_shape = (state_0.shape[0],8, 2)  
+                            # state_reversed = state_0.view(original_shape)
+                            # state_reversed=state_reversed.permute(1,0,2)
+                            # actions_tensor=torch.stack(actions)
+                            # l2_loss_rel2=l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="full") #[b,12] 
+                            
+                            
+                            
+                            ####################
+                            # l2_loss_rel.append(
+                            # l2_loss(state_action,  gt, loss_mask, mode="raw")
+                            # )
+                            # l2_loss_rel.shape= [b,18]
+                            # gt [b,18]
+                            # state_action [b,18]
+                            
+                            # policy_loss = torch.zeros(1).to(l2_loss_rel[0]) # list([(b)])
+                            # l2_loss_rel = torch.stack(l2_loss_rel, dim=1) # list b*[(1)]
+                            # l2_loss_rel=[]
+                            # loss_mask=env.loss_mask[:, args.obs_len :]
+                            # original_shape = (state_0.shape[0],8, 2)  
+                            # state_reversed = state_0.view(original_shape)
+                            # state_reversed=state_reversed.permute(1,0,2)
+                            # actions_tensor=torch.stack(actions)
+                            # l2_loss_rel.append(
+                            # l2_loss(actions_tensor,  env.pred_traj_gt_rel, loss_mask, mode="raw")
+                            # )
+                            # reward_full = -torch.stack(l2_loss_rel, dim=1).squeeze() # list b*[(1)]
+                            # # reward_full2 = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
+                            
+                            #THIS ONE TO USE
+
                         
                         # policy_loss=l2_loss_rel.mean()   
                 rewards.append(reward)
@@ -178,13 +196,27 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
                             if args.step_definition == 'single':
                                 gt = ground_truth
                                 reward_full = torch.squeeze(custom_reward(env,args, state_0, action_full, gt), dim=1)
-                                
-                if args.step_definition == 'multi':
-                    rewards = torch.cat(rewards, dim=0)  # (bx12,)
-                states = torch.cat(states, dim=0)        # (bx12, 16)
+                if args.loss_definition=='l2':             
+                    if args.step_definition == 'multi':
+                        rewards = torch.cat(rewards, dim=0)  # (bx12,)
+                    if args.reward=='cumulative' and args.randomness_definition=='stochastic' and args.step_definition == 'multi':
+                        states=state_0 
+                    else:
+                       states = torch.cat(states, dim=0)        # (bx12, 16)
+                       
+                    actions = torch.cat(actions, dim=0)      # (bx12, 2)
+                else:
+                    if args.step_definition == 'single':
+                        rewards = torch.cat(rewards, dim=0)
+                        states = torch.cat(states, dim=0) 
+                    actions = torch.cat(actions, dim=0)  # (bx12, 2)
+                    if args.step_definition == 'multi':
+                        rewards = torch.cat(rewards, dim=0)  # (bx12,)
+                        env.pred_state_actions= torch.cat(env.pred_state_actions, dim=0)
+                        env.mask_disc=torch.cat(env.mask_disc, dim=0)
                 # print_structure_and_dimensions(actions)
                 # print("agent")
-                actions = torch.cat(actions, dim=0)      # (bx12, 2)
+                
                 # print_structure_and_dimensions(actions)
                 # print("agent")
                 # print("REWARDS", len(rewards), len(reward_full))

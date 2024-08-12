@@ -30,7 +30,9 @@ class Profile:
     
 def log_exception(exc_type, exc_value, exc_traceback):
     logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
-
+def clear_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
 # Set the global exception hook
 # sys.excepthook = log_exception
 
@@ -38,7 +40,7 @@ def log_exception(exc_type, exc_value, exc_traceback):
 # logging.basicConfig(level=logging.ERROR, filename='errors.log')
 
 from irl.utils import *
-from irl.models import Policy, Discriminator, Value
+from irl.models import Policy, Discriminator, Value, TrajectoryDiscriminator
 from irl.model_stgat import TrajectoryGenerator
 from irl.replay_memory import Memory
 from torch import nn
@@ -59,7 +61,11 @@ torch.set_num_threads(32)
 from scripts.evaluate_model import evaluate_irl
 
 
-
+def initialize_weights(module):
+    if isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight, gain=0.001)  # gain=0.01 to make weights smaller
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
 class DiscriminatorManager(nn.Module):
         def __init__(self, discriminator_early, discriminator_late, env):
             super(DiscriminatorManager, self).__init__()
@@ -87,32 +93,33 @@ parser = argparse.ArgumentParser(description='PyTorch Unified PPP framework')
 
 parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
 parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
-parser.add_argument("--l2_reg", default=0.1, help="PPO_regularization")
+parser.add_argument("--l2_reg", default=0.0, help="PPO_regularization")
 
+parser.add_argument("--reward", default="cumulative", help="type of reward/action definition, either cumulative or window (rolling window)")
 
 parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
 parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
-parser.add_argument('--loss_definition', default='l2',  type=str, help='either discriminator or l2')
+parser.add_argument('--loss_definition', default='discriminator',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
-parser.add_argument('--discount_factor', type=float, default=0.0, help='discount factor gamma, value between 0.0 and 1.0')
+parser.add_argument('--discount_factor', type=float, default=1, help='discount factor gamma, value between 0.0 and 1.0')
 parser.add_argument('--optim_value_iternum', type=int, default=1, help='minibatch size')
 
-parser.add_argument('--training_algorithm', default='ppo',  type=str, help='choose which RL updating algorithm, either "reinforce", "baseline" or "ppo" or "ppo_only"')
+parser.add_argument('--training_algorithm', default='reinforce',  type=str, help='choose which RL updating algorithm, either "reinforce", "baseline" or "ppo" or "ppo_only"')
 parser.add_argument('--trainable_noise', type=bool, default=False, help='add a noise to the input during training')
-parser.add_argument('--ppo-iterations', type=int, default=1, help='number of ppo iterations (default=1)')
+parser.add_argument('--ppo-iterations', type=int, default=10, help='number of ppo iterations (default=1)')
 parser.add_argument('--ppo-clip', type=float, default=0.2, help='amount of ppo clipping (default=0.2)')
-parser.add_argument('--learning-rate', type=float, default=1e-3, metavar='G', help='learning rate (default: 1e-5)')
+parser.add_argument('--learning-rate', type=float, default=0.001, metavar='G', help='learning rate (default: 1e-5)')
 parser.add_argument('--batch_size', default=64, type=int, help='number of sequences in a batch (can be multiple paths)')
 parser.add_argument('--log-std', type=float, default=-2.99, metavar='G', help='log std for the policy (default=-0.0)')
 parser.add_argument('--num_epochs', default=330, type=int, help='number of times the model sees all data')
 
 parser.add_argument('--seeding', type=bool, default=True, help='turn seeding on or off')
-parser.add_argument('--seed', type=int, default=0, metavar='N', help='random seed (default: 0)')
+parser.add_argument('--seed', type=int, default=73, metavar='N', help='random seed (default: 0)')
 parser.add_argument('--multiple_executions', type=bool, default=True, help='turn multiple runs on or off')
 parser.add_argument('--runs', type=int, default=5, help='number of times the script runs')
 parser.add_argument('--all_datasets', type=bool, default=True, help='run the script for all 5 datasets at once or not')
 parser.add_argument('--dataset_name', default='hotel',  type=str, help='choose which dataset to train for')
-parser.add_argument('--check_testset', type=bool, default=False, help='also evaluate on the testset, next to validation set')
+parser.add_argument('--check_testset', type=bool, default=True, help='also evaluate on the testset, next to validation set')
 parser.add_argument('--output_dir', default=os.getcwd(), help='path where models are saved (default=current directory)')
 parser.add_argument('--save_model_name_ADE', default="saved_model_ADE", help='name of the saved model')
 parser.add_argument('--save_model_name_FDE', default="saved_model_FDE", help='name of the saved model')
@@ -128,9 +135,8 @@ parser.add_argument('--skip', default=1, type=int, help='used for skipping seque
 parser.add_argument('--delim', default='\t', help='how to read the data text file spacing')
 parser.add_argument('--l2_loss_weight', default=1, type=float, help='l2 loss multiplier (default=0)')
 parser.add_argument('--use_gpu', default=1, type=int)                   # use gpu, if 0, use cpu only
-parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
+parser.add_argument('--gpu-index', type=int, default=1, metavar='N')
 parser.add_argument('--load_saved_model', default=None, metavar='G', help='path of pre-trained model')
-
 #STGAT ==========================================================
 
 parser.add_argument('--scene_value_net', type=float, default=False, help='Decides whether the value network consideres whole scene or single pedestrian, boolean value')
@@ -163,7 +169,7 @@ parser.add_argument(
 )
 parser.add_argument("--graph_lstm_hidden_size", default=32, type=int)
 parser.add_argument(
-    "--dropout", type=float, default=0, help="Dropout rate (1 - keep probability)."
+    "--dropout", type=float, default=0.0, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument(
     "--alpha", type=float, default=0.2, help="Alpha for the leaky_relu."
@@ -206,8 +212,7 @@ def log_memory_usage(message):
     # logging.info(f"{message}: Memory usage is {memory} MB")
     cuda_memory = torch.cuda.memory_allocated()
     print(f"Memory RAM usage is {memory} MB and CUDA {cuda_memory}")
-def main_loop(args, writer, metric_dict, hparams):
-
+def main_loop(args, writer, metric_dict, hparams, trial):
     """"definitions"""
     if args.randomness_definition == 'stochastic':
         mean_action = False
@@ -216,12 +221,11 @@ def main_loop(args, writer, metric_dict, hparams):
     else:
         print("Wrong definition for randomness, please choose either stochastic or deterministic")
 
-
     """seeding"""
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True           # what does this do again?
+    torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
     """dtype and device"""
@@ -229,39 +233,39 @@ def main_loop(args, writer, metric_dict, hparams):
     torch.set_default_dtype(dtype)
     device = torch.device('cuda', index=args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
     if torch.cuda.is_available():
-        # print("AAAAAAAAAAA")
         torch.cuda.set_device(args.gpu_index)
     print("device: ", device)
     global mid_pad
-    
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_num
+
     """models"""
-    if args.model=="original":
-        mid_pad=0
-        policy_net = Policy(16, 2, log_std=args.log_std)     # 16, 2
-    elif args.model=="stgat":
-        mid_pad=1
+    if args.model == "original":
+        mid_pad = 0
+        policy_net = Policy(16, 2, log_std=args.log_std)
+    elif args.model == "stgat":
+        mid_pad = 1
         n_units = (
-        [args.traj_lstm_hidden_size]
-        + [int(x) for x in args.hidden_units.strip().split(",")]
-        + [args.graph_lstm_hidden_size]
+            [args.traj_lstm_hidden_size]
+            + [int(x) for x in args.hidden_units.strip().split(",")]
+            + [args.graph_lstm_hidden_size]
         )
         n_heads = [int(x) for x in args.heads.strip().split(",")]
-        policy_net =  TrajectoryGenerator(
-        args,
-        obs_len=args.obs_len,
-        pred_len=args.pred_len,
-        traj_lstm_input_size=args.traj_lstm_input_size,
-        traj_lstm_hidden_size=args.traj_lstm_hidden_size,
-        n_units=n_units,
-        n_heads=n_heads,
-        graph_network_out_dims=args.graph_network_out_dims,
-        dropout=args.dropout,
-        alpha=args.alpha,
-        graph_lstm_hidden_size=args.graph_lstm_hidden_size,
-        noise_dim=args.noise_dim,
-        noise_type=args.noise_type,
-        log_std=args.log_std,
-        action_dim=2
+        policy_net = TrajectoryGenerator(
+            args,
+            obs_len=args.obs_len,
+            pred_len=args.pred_len,
+            traj_lstm_input_size=args.traj_lstm_input_size,
+            traj_lstm_hidden_size=args.traj_lstm_hidden_size,
+            n_units=n_units,
+            n_heads=n_heads,
+            graph_network_out_dims=args.graph_network_out_dims,
+            dropout=args.dropout,
+            alpha=args.alpha,
+            graph_lstm_hidden_size=args.graph_lstm_hidden_size,
+            noise_dim=args.noise_dim,
+            noise_type=args.noise_type,
+            log_std=args.log_std,
+            action_dim=2
         )
         policy_net.cuda()
 
@@ -279,67 +283,50 @@ def main_loop(args, writer, metric_dict, hparams):
             )
         else:
             logging.info("=> no checkpoint found at '{}'".format(args.resume))
-
-
-            # train(args, model, train_loader, optimizer, epoch, training_step, writer)
-            # if training_step == 3:
-            #     ade = validate(args, model, val_loader, epoch, writer)
-            #     is_best = ade < best_ade
-            #     best_ade = min(ade, best_ade)
-
-                # save_checkpoint(
-                #     {
-                #         "epoch": epoch + 1,
-                #         "state_dict": model.state_dict(),
-                #         "best_ade": best_ade,
-                #         "optimizer": optimizer.state_dict(),
-                #     },
-                #     is_best,
-                #     epoch,
-                #     args.pred_len,
-                #     f"./checkpoint/checkpoint{args.da1taset_name,args.best_k, epoch, args.pred_len}.pth.tar"
-                # )
         writer.close()
-    disc_single = Discriminator(40) #40
-    disc_multi = Discriminator(18)
-    
+
     if args.step_definition == 'multi':
+        disc_single = Discriminator(40)
+        disc_multi = Discriminator(18)
         discriminator_net = disc_multi
     elif args.step_definition == 'single':
-        if args.model=='original':
-         discriminator_net = disc_single      #changed from single as experiment
-        elif args.model=='stgat':
-            if   args.disc_type=='original':
-                # discriminator_net = Discriminator(32)
-                discriminator_early = Discriminator(32)  # Assuming this uses input size 32
-                discriminator_late = Discriminator(40)   # Modify according to your needs
-                discriminator_net=Discriminator_LSTM()
-       # You might want to move these definitions to a place where they can be initialized with appropriate device settings:
+        if args.model == 'original':
+            disc_single = Discriminator(40)
+            disc_multi = Discriminator(18)
+            discriminator_net = disc_single
+        elif args.model == 'stgat':
+            if args.disc_type == 'original':
+                discriminator_net = Discriminator(40)
+                num_inputs = 2  # traj_dim, typically 2 for (x, y) coordinates
+                seq_len = 20  # Sequence length (assuming input is reshaped to have 20 time steps)
+                hidden_dim = 128  # Hidden size of LSTM (smaller than before)
 
-                print("bla")
+                # discriminator_net = TrajectoryDiscriminator(num_inputs, seq_len, hidden_dim)
+                discriminator_net.apply(initialize_weights)
+                print("Discriminator initialized")
             else:
                 n_units = (
-                [4]
-                + [int(x) for x in args.hidden_units.strip().split(",")]
-                + [4]
+                    [4]
+                    + [int(x) for x in args.hidden_units.strip().split(",")]
+                    + [4]
                 )
-                n_heads = [int(x) for x in [1,1]]
-                discriminator_net =  STGAT_discriminator(
-                args,
-                obs_len=16,
-                pred_len=1,
-                traj_lstm_input_size=2,
-                traj_lstm_hidden_size=4,
-                n_units=n_units,
-                n_heads=n_heads,
-                graph_network_out_dims=4,
-                dropout=args.dropout,
-                alpha=args.alpha,
-                graph_lstm_hidden_size=4,
-                noise_dim=args.noise_dim,
-                noise_type=args.noise_type,
-                log_std=args.log_std,
-                action_dim=2
+                n_heads = [int(x) for x in [1, 1]]
+                discriminator_net = STGAT_discriminator(
+                    args,
+                    obs_len=16,
+                    pred_len=1,
+                    traj_lstm_input_size=2,
+                    traj_lstm_hidden_size=4,
+                    n_units=n_units,
+                    n_heads=n_heads,
+                    graph_network_out_dims=4,
+                    dropout=args.dropout,
+                    alpha=args.alpha,
+                    graph_lstm_hidden_size=4,
+                    noise_dim=args.noise_dim,
+                    noise_type=args.noise_type,
+                    log_std=args.log_std,
+                    action_dim=2
                 )
 
     """create environment"""
@@ -347,33 +334,21 @@ def main_loop(args, writer, metric_dict, hparams):
 
     policy_net.to(device)
     policy_net.type(dtype).train()
-    if args.disc_type=='original':
-                # discriminator_early.to(device)
-                # discriminator_late.to(device)
-                # discriminator_early.cuda()
-                # discriminator_late.cuda()
-                # discriminator_early.type(dtype).train()
-                # discriminator_late.type(dtype).train()
-                # discriminator_net=DiscriminatorManager(discriminator_early, discriminator_late, env)
-                discriminator_net.to(device)
-                discriminator_net.cuda()
-                discriminator_net.type(dtype).train()
-
+    if args.disc_type == 'original':
+        discriminator_net.to(device)
+        discriminator_net.cuda()
+        discriminator_net.type(dtype).train()
     else:
         discriminator_net.to(device)
         discriminator_net.cuda()
         discriminator_net.type(dtype).train()
 
-    
     print("Policy_net: ", policy_net)
     print("Discriminator_net: ", discriminator_net)
-    if (args.training_algorithm == 'baseline' or args.training_algorithm == 'ppo' or args.training_algorithm == 'ppo_only'):
-        if args.scene_value_net==True:
-            print("AAAAAAAAAAAAAAA", device)
+    if args.training_algorithm in ['baseline', 'ppo', 'ppo_only']:
+        if args.scene_value_net:
             value_net = Value(64)
-            # print("WORKING")
         else:
-            print("AAAAAAAAAAAAAAA", device)
             value_net = Value(16)
         value_net.to(device)
         value_net.type(dtype).train()
@@ -382,49 +357,40 @@ def main_loop(args, writer, metric_dict, hparams):
         value_net = None
 
     """optimizers"""
-    if args.model=="original" :
-        policy_opt = torch.optim.Adam(policy_net.parameters(), lr=args.learning_rate)
-        disc_lr = args.learning_rate
-        discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=disc_lr)
-    elif args.model=="stgat":
+    if args.model == "original":
+        policy_opt = torch.optim.Adam(policy_net.parameters(), lr=args.policy_lr)
+        discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=args.discriminator_lr)
+    elif args.model == "stgat":
         policy_opt = optim.Adam(
-        [
-            {"params": policy_net.traj_lstm_model.parameters(), "lr": args.lr},#1e-2
-            {"params": policy_net.traj_hidden2pos.parameters()},
-            {"params": policy_net.gatencoder.parameters(), "lr": args.lr}, #3e-2
-            {"params": policy_net.graph_lstm_model.parameters(), "lr": args.lr}, #1e-2}
-            {"params": policy_net.traj_gat_hidden2pos.parameters()},
-            {"params": policy_net.pred_lstm_model.parameters()},
-            {"params": policy_net.pred_hidden2pos.parameters()},
-        ],
-        lr= args.lr ,#args.lr,
+            [
+                {"params": policy_net.traj_lstm_model.parameters(), "lr": args.policy_lr},
+                {"params": policy_net.traj_hidden2pos.parameters(), "lr": args.policy_lr},
+                {"params": policy_net.gatencoder.parameters(), "lr": args.policy_lr},
+                {"params": policy_net.graph_lstm_model.parameters(), "lr": args.policy_lr},
+                {"params": policy_net.traj_gat_hidden2pos.parameters(), "lr": args.policy_lr},
+                {"params": policy_net.pred_lstm_model.parameters(), "lr": args.policy_lr},
+                {"params": policy_net.pred_hidden2pos.parameters(), "lr": args.policy_lr},
+            ],
+            lr=args.policy_lr,
         )
-        if args.disc_type=='original':
-            disc_lr = 1e-2 #args.learning_rate
-            discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=disc_lr)
-            # discriminator_early = torch.optim.Adam(discriminator_early.parameters(), lr=disc_lr)
-            # discriminator_opt = torch.optim.Adam(discriminator_late.parameters(), lr=disc_lr)
-
+        if args.disc_type == 'original':
+            discriminator_opt = torch.optim.Adam(discriminator_net.parameters(), lr=args.discriminator_lr)
         else:
             discriminator_opt = optim.Adam(
-            [
-                {"params": policy_net.traj_lstm_model.parameters(), "lr": 1e-2},
-                {"params": policy_net.traj_hidden2pos.parameters()},
-                {"params": policy_net.gatencoder.parameters(), "lr": 3e-2},
-                {"params": policy_net.graph_lstm_model.parameters(), "lr": 1e-2},
-                {"params": policy_net.traj_gat_hidden2pos.parameters()},
-                {"params": policy_net.pred_lstm_model.parameters()},
-                {"params": policy_net.pred_hidden2pos.parameters()},
-            ],
-            lr=1e-3,
+                [
+                    {"params": discriminator_net.traj_lstm_model.parameters(), "lr": args.discriminator_lr},
+                    {"params": discriminator_net.traj_hidden2pos.parameters(), "lr": args.discriminator_lr},
+                    {"params": discriminator_net.gatencoder.parameters(), "lr": args.discriminator_lr},
+                    {"params": discriminator_net.graph_lstm_model.parameters(), "lr": args.discriminator_lr},
+                    {"params": discriminator_net.traj_gat_hidden2pos.parameters(), "lr": args.discriminator_lr},
+                    {"params": discriminator_net.pred_lstm_model.parameters(), "lr": args.discriminator_lr},
+                    {"params": discriminator_net.pred_hidden2pos.parameters(), "lr": args.discriminator_lr},
+                ],
+                lr=args.discriminator_lr,
             )
-
-
-
-
     discriminator_crt = nn.BCELoss()
     custom_reward = nn.BCELoss(reduction='none')
-    if (args.training_algorithm == 'baseline' or args.training_algorithm == 'ppo' or args.training_algorithm == 'ppo_only'):
+    if args.training_algorithm in ['baseline', 'ppo', 'ppo_only']:
         value_opt = torch.optim.Adam(value_net.parameters(), lr=args.learning_rate)
         value_crt = nn.MSELoss()
     else:
@@ -497,70 +463,41 @@ def main_loop(args, writer, metric_dict, hparams):
         discriminator_net.load_state_dict(saved_model['discriminator_net_state'])
         discriminator_opt.load_state_dict(saved_model['discriminator_opt_state'])
 
-
     """custom reward for policy"""
-    def expert_reward(env, args, state, action, gt=0):     # probs separate function for discount
-
-        state_action = torch.cat((state, action), dim=1)  # (b, 16) + (b, 24) = (b, 40)
+    def expert_reward(env, args, state, action, gt=0):
+        state_action = torch.cat((state, action), dim=1)
         if args.loss_definition == 'discriminator':
-            if args.model=='original' or args.disc_type=='original':
+            if args.model == 'original' or args.disc_type == 'original':
                 disc_out = discriminator_net(state_action)
-            elif args.model=='stgat':
+            elif args.model == 'stgat':
                 if env.training_step == 1 or env.training_step == 2:
                     disc_out = discriminator_net(state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
                 else:
                     disc_out = discriminator_net(state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)
             labels = torch.ones_like(disc_out)
-            expert_reward = -custom_reward(disc_out, labels)  # pytorch nn.BCELoss() already has a -
-
+            expert_reward = -custom_reward(disc_out, labels)
         elif args.loss_definition == 'l2':
-            if args.model=="original":
-                # print("state_action",state_action.shape)
-                l2 = (gt - state_action)**2  # (b, 40) - (b, 40) ** 2 (for single, (b,18) for multi)
-                l2 = l2[:, 16:]              # test to only include action difference instead of state-action
-                expert_reward = -l2.sum(dim=1, keepdim=True)    #div dim action space
-                
-            elif args.model=="stgat":
-                # for stgat the expected shape for trianing step==1 or 2: state =torch.Size([batch, 32])
-                #                                 for trianing step==3:                     
+            if args.model == "original":
+                l2 = (gt - state_action) ** 2
+                l2 = l2[:, 16:]
+                expert_reward = -l2.sum(dim=1, keepdim=True)
+            elif args.model == "stgat":
                 if training_step == 1 or training_step == 2:
-                    # print("state_action",state_action.shape)
-                    l2 = (gt[:, :16] - state_action[:, 16:] )**2  # (b, 16) - (b, 16) ** 2  here state_action is (b, 32)
-                    #l2.shape= (b,16)
-                    # print("gt", gt.shape, os.path.basename(__file__))
-                   #  only includes action difference instead of state-action
-                    expert_reward = -l2.sum(dim=1, keepdim=True)    #div dim action space  (b,1)
-                    # print("expert_reward", expert_reward.shape, os.path.basename(__file__))
-                    frame = inspect.currentframe()
-                    # Get the caller's stack frame
-                    caller_frame = frame.f_back
-                    # Retrieve information about the caller
-                    caller_info = inspect.getframeinfo(caller_frame)
-                    
-                    # Print the caller's file name and line number
-                    # print(f"Called from {caller_info.filename} at line {caller_info.lineno}")
-       
+                    l2 = (gt[:, :16] - state_action[:, 16:]) ** 2
+                    expert_reward = -l2.sum(dim=1, keepdim=True)
                 else:
-                    l2 = (gt - state_action)**2  # (b, 40) - (b, 40) ** 2 (for single, (b,18) for multi)
-                    l2 = l2[:, 16:]              # test to only include action difference instead of state-action
-                    expert_reward = -l2.sum(dim=1, keepdim=True)    #div dim action space
-                    
+                    l2 = (gt - state_action) ** 2
+                    l2 = l2[:, 16:]
+                    expert_reward = -l2.sum(dim=1, keepdim=True)
         else:
             print("Wrong definition for loss, please choose either discriminator or l2")
-
-        return expert_reward    # tensor(b,1)
-
+        return expert_reward
 
     """create agent"""
-    
     agent = Agent(args, env, policy_net, device, custom_reward=expert_reward)
 
-
-
-
     """update parameters function"""
-    def update_params(args, batch, expert, train):
-
+    def update_params(args, batch, expert, train, epoch):
         loss_policy = 0
         loss_discriminator = 0
         loss_value = 0
@@ -573,101 +510,86 @@ def main_loop(args, writer, metric_dict, hparams):
                 if args.step_definition == 'single':
                     expert_state_actions = expert
                     pred_state_actions = torch.cat([states, actions], dim=1)
-                    
-                    # print(" expert_state_actions, pred_state_actions",  expert_state_actions, pred_state_actions)
-
-                    # print(" expert_state_actions, pred_state_actions",  expert_state_actions.shape, pred_state_actions.shape)
                 elif args.step_definition == 'multi':
-                    expert_state_actions = expert   # (bx12, 18)
-                   
-                    pred_state_actions = torch.cat([states_all[0], actions_all[0]], dim=1)  #(bx12, 18)
-                    #state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
-                discriminator_loss = discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train)
+                    expert_state_actions = expert
+                    pred_state_actions = torch.cat([states_all[0], actions_all[0]], dim=1)
+                discriminator_loss = discriminator_step(args, env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train, epoch, writer)
                 loss_discriminator += discriminator_loss
 
         """perform policy (REINFORCE) update"""
         for _ in range(args.policy_steps):
-            policy_loss, value_loss = reinforce_step(args, env, policy_net, policy_opt, expert_reward, states_all, actions_all,
-                                         rewards_all, rewards, expert, train, value_net, value_opt, value_crt, training_step=training_step)
-
+            policy_loss, value_loss = reinforce_step(args, env, policy_net, policy_opt, expert_reward, states, states_all, actions_all,
+                                                     rewards_all, rewards, expert, train, value_net, value_opt, value_crt, training_step=training_step, epoch=epoch, writer=writer)
             loss_policy += policy_loss
             loss_value += value_loss
 
-        return loss_policy/args.policy_steps, loss_discriminator/args.discriminator_steps, loss_value/args.policy_steps
-
+        return loss_policy / args.policy_steps, loss_discriminator / args.discriminator_steps, loss_value / args.policy_steps
 
     def train_loop():
-        min_ade, min_fde = float('inf'), float('inf')  
-        epoch_ade, epoch_fde = -1, -1 
+        # min_ade, min_fde = float('inf'), float('inf')  
+        # epoch_ade, epoch_fde = -1, -1 
         global training_step
         t0 = time.time()
         training_step = 1
 
-
-        for epoch in range(args.start_epoch, args.num_epochs):     # epochs
+        for epoch in range(args.start_epoch, args.num_epochs):
             t1 = time.time()
-
             print("\nEpoch: ", epoch, "/", args.num_epochs)
-            if args.model=="stgat":
-                """perform conditioning ofr STGAT"""                
+            if args.model == "stgat":
+                """perform conditioning for STGAT"""
                 if epoch < 150:
                     training_step = 1
-                    env.training_step=1
+                    env.training_step = 1
                 elif epoch < 250:
                     training_step = 2
-                    env.training_step=2
+                    env.training_step = 2
                 else:
                     if epoch == 250:
                         for param_group in policy_opt.param_groups:
-                            param_group["lr"] = args.lr #5e-3
+                            param_group["lr"] = 5e-3
                     training_step = 3
-                    env.training_step=3
+                    env.training_step = 3
             """perform training steps"""
-            agent.training_step=training_step
+            agent.training_step = training_step
             train = True
             loss_policy = torch.zeros(1, device=device)
             loss_discriminator = torch.zeros(1, device=device)
             loss_value = torch.zeros(1, device=device)
 
             for batch_input in train_loader:
-                # with torch.autograd.set_detect_anomaly(True):
-                    # print("BATCH START")
-                    env.generate(batch_input)                                   # sets a batch of observed trajectories
-                    # print("STEP ____",env.training_step)
-                    batch = agent.collect_samples(mean_action=mean_action)      # batch contains a tensor of states (8 steps), a tensor of actions (12 steps) and a tensor of rewards (1 for the whole trajectory)
-                    
-                    expert = env.collect_expert()                               # the expert is a batch of full ground truth trajectories
+                env.generate(batch_input)
+                batch = agent.collect_samples(mean_action=mean_action)
+                expert = env.collect_expert()
 
-                    policy_loss, discriminator_loss, value_loss = update_params(args, batch, expert, train)
-                    loss_policy += policy_loss
-                    del policy_loss
-                    loss_discriminator += discriminator_loss
-                    loss_value += value_loss
-                    # print("BATCH END")
-                    writer.add_scalar('train_loss_policy', loss_policy.item(), epoch)
-                    writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
-                    writer.add_scalar('train_loss_value', loss_value.item(), epoch)
-            if args.model=="original" or args.model=="stgat" :
-                # metrics_train = check_accuracy(env,args, train_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)       # limit=true causes sinusoidal train ADE
+                policy_loss, discriminator_loss, value_loss = update_params(args, batch, expert, train, epoch)
+                loss_policy += policy_loss
+                del policy_loss
+                loss_discriminator += discriminator_loss
+                loss_value += value_loss
 
+                writer.add_scalar('train_loss_policy', loss_policy.item(), epoch)
+                writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
+                writer.add_scalar('train_loss_value', loss_value.item(), epoch)
+
+            if args.model in ["original", "stgat"]:
+                metrics_train = check_accuracy(env, args, train_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)
                 loss_policy = loss_policy / train_loader_len
                 loss_discriminator = loss_discriminator / train_loader_len
                 loss_value = loss_value / train_loader_len
 
-                # writer.add_scalar('train_loss_policy', loss_policy.item(), epoch)
-                # writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
-                # writer.add_scalar('train_loss_value', loss_value.item(), epoch)
-                # writer.add_scalar('ADE_train', metrics_train['ade'], epoch)
-                # writer.add_scalar('FDE_train', metrics_train['fde'], epoch)
+                writer.add_scalar('train_loss_policy', loss_policy.item(), epoch)
+                writer.add_scalar('train_loss_discriminator', loss_discriminator.item(), epoch)
+                writer.add_scalar('train_loss_value', loss_value.item(), epoch)
+                writer.add_scalar('ADE_train', metrics_train['ade'], epoch)
+                writer.add_scalar('FDE_train', metrics_train['fde'], epoch)
 
-                # print('train loss_policy: ', loss_policy.item())
-                # print('train loss_discriminator: ', loss_discriminator.item())
-                # print('train loss_value: ', loss_value.item())
-                # print('train ADE: ', metrics_train['ade'])
-                # print('train FDE: ', metrics_train['fde'])
+                print('train loss_policy: ', loss_policy.item())
+                print('train loss_discriminator: ', loss_discriminator.item())
+                print('train loss_value: ', loss_value.item())
+                print('train ADE: ', metrics_train['ade'])
+                print('train FDE: ', metrics_train['fde'])
 
                 if epoch % args.check_validation_every == 0:
-
                     """perform validation steps"""
                     train = False
                     loss_policy_val = torch.zeros(1, device=device)
@@ -678,24 +600,27 @@ def main_loop(args, writer, metric_dict, hparams):
                         batch = agent.collect_samples(mean_action=mean_action)
                         expert = env.collect_expert()
 
-                        policy_loss_val, discriminator_loss_val, value_loss_val = update_params(args, batch, expert, train)
+                        policy_loss_val, discriminator_loss_val, value_loss_val = update_params(args, batch, expert, train, epoch)
                         loss_policy_val += policy_loss_val
                         loss_discriminator_val += discriminator_loss_val
                         loss_value_val += value_loss_val
 
-                    # metrics_validation = check_accuracy(env,args, val_loader, policy_net,args.obs_len, args.pred_len, device, limit=False)
-                    metrics_validation = validate(args, policy_net, val_loader)
+                    if args.model == "stgat":
+                        metrics_validation = check_accuracy(env, args, val_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)
+                    else:
+                        metrics_validation = check_accuracy(env, args, val_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)
 
-                    ### test set check
-                    if args.check_testset is True:
+                    """test set check"""
+                    if args.check_testset:
+                        # metrics_validation_test = check_accuracy(env, args, test_loader, policy_net, args.obs_len, args.pred_len, device, limit=False)
+                        # test_ade, test_fde = metrics_validation_test['ade'], metrics_validation_test['fde']
                         test_ade, test_fde = evaluate_irl(env,args, test_loader, policy_net, num_samples=1, mean_action=True, noise=args.trainable_noise, device=device)
-                        test_minade, test_minfde = evaluate_irl(env,args, test_loader, policy_net, num_samples=20, mean_action=False, noise=args.trainable_noise, device=device)
+                        # test_minade, test_minfde = evaluate_irl(env,args, test_loader, policy_net, num_samples=20, mean_action=False, noise=args.trainable_noise, device=device)
                         writer.add_scalar('ADE_test', test_ade, epoch)
                         writer.add_scalar('FDE_test', test_fde, epoch)
-                        writer.add_scalar('minADE_test', test_minade, epoch)
-                        writer.add_scalar('minFDE_test', test_minfde, epoch)
                         print('ADE_test', test_ade)
                         print('FDE_test', test_fde)
+
                     loss_policy_val = loss_policy_val / val_loader_len
                     loss_discriminator_val = loss_discriminator_val / val_loader_len
                     loss_value_val = loss_value_val / val_loader_len
@@ -705,78 +630,97 @@ def main_loop(args, writer, metric_dict, hparams):
                     writer.add_scalar('validation_loss_value', loss_value_val.item(), epoch)
                     writer.add_scalar('ADE_val', metrics_validation['ade'], epoch)
                     writer.add_scalar('FDE_val', metrics_validation['fde'], epoch)
-                    if epoch==329:
-                        metric_dict.update({'ade': metrics_validation['ade'], 'fde': metrics_validation['fde']})  # Update metrics
-                        writer.add_hparams(hparams, metric_dict)
 
-                    # print('validation loss_policy: ', loss_policy_val.item())
-                    # print('validation loss_discriminator: ', loss_discriminator_val.item())
-                    # print('validation loss_value: ', loss_value_val.item())
-                    # print('validation ADE: ', metrics_validation['ade'])
-                    # print('validation FDE: ', metrics_validation['fde'])
 
                     if saved_model_ADE['ADE_val']:
                         min_ade = saved_model_ADE['ADE_val']  # both linear and non-linear
+                    
+                    if saved_model_ADE['ADE_val']:
+                        min_ade = saved_model_ADE['ADE_val']  # both linear and non-linear
 
-                    else:
-                        min_ade = metrics_validation['ade']
-                        
-                    if saved_model_FDE['FDE_val']:
-                        min_fde = saved_model_FDE['FDE_val']  # both linear and non-linear
-                    else:
-                        min_fde = metrics_validation['fde']
+                    print('validation loss_policy: ', loss_policy_val.item())
+                    print('validation loss_discriminator: ', loss_discriminator_val.item())
+                    print('validation loss_value: ', loss_value_val.item())
+                    print('validation ADE: ', metrics_validation['ade'])
+                    print('validation FDE: ', metrics_validation['fde'])
+
+                    min_ade = saved_model_ADE['ADE_val'] if saved_model_ADE['ADE_val'] else metrics_validation['ade']
+                    min_fde = saved_model_FDE['FDE_val'] if saved_model_FDE['FDE_val'] else metrics_validation['fde']
 
                     if metrics_validation['ade'] <= min_ade:
                         epoch_ade=epoch
-                        writer.add_scalar('epoch_ade', epoch_ade, epoch)
-                        writer.add_scalar('min_ade', min_ade, epoch)
-                        print('New low for min ADE_val, model saved')
-                        saved_model_ADE['epoch'] = epoch
-                        saved_model_ADE['policy_net_state'] = policy_net.state_dict()
-                        saved_model_ADE['policy_opt_state'] = policy_opt.state_dict()
-                        saved_model_ADE['discriminator_net_state'] = discriminator_net.state_dict()
-                        saved_model_ADE['discriminator_opt_state'] = discriminator_opt.state_dict()
-                        saved_model_ADE['ADE_val'] = metrics_validation['ade']
-                        # saved_model_ADE['ADE_train'] = metrics_train['ade']
-                        saved_model_ADE['FDE_val'] = metrics_validation['fde']
-                        # saved_model_ADE['FDE_train'] = metrics_train['fde']
-                        saved_model_ADE['policy-loss_val'] = loss_policy_val.item()
-                        saved_model_ADE['policy-loss_train'] = loss_policy.item()
-                        saved_model_ADE['discriminator-loss_val'] = loss_discriminator_val.item()
-                        saved_model_ADE['discriminator-loss_train'] = loss_discriminator.item()
-                        saved_model_ADE['value-loss_val'] = loss_value_val.item()
-                        saved_model_ADE['value-loss_train'] = loss_value.item()
-                        torch.save(saved_model_ADE, save_model_path_ADE)
-                        print("saving to: ", save_model_path_ADE)
+                        print("New low for min ADE_val, model saved")
+                        saved_model_ADE.update({
+                            'epoch': epoch,
+                            'policy_net_state': policy_net.state_dict(),
+                            'policy_opt_state': policy_opt.state_dict(),
+                            'discriminator_net_state': discriminator_net.state_dict(),
+                            'discriminator_opt_state': discriminator_opt.state_dict(),
+                            'ADE_val': metrics_validation['ade'],
+                            'ADE_train': metrics_train['ade'],
+                            'FDE_val': metrics_validation['fde'],
+                            'FDE_train': metrics_train['fde'],
+                            'policy-loss_val': loss_policy_val.item(),
+                            'policy-loss_train': loss_policy.item(),
+                            'discriminator-loss_val': loss_discriminator_val.item(),
+                            'discriminator-loss_train': loss_discriminator.item(),
+                            'value-loss_val': loss_value_val.item(),
+                            'value-loss_train': loss_value.item(),
+                        })
+                        # torch.save(saved_model_ADE, save_model_path_ADE)
+                        # torch.save(saved_model_ADE, save_model_path_ADE)
+                        save_model_path_epoch = os.path.join(
+                            args.output_dir,
+                            f'model_ADE_{epoch}_trial_{trial.number}_policy_lr_{args.policy_lr}_disc_lr_{args.discriminator_lr}.pt'
+                        )
+                        torch.save(saved_model_ADE, save_model_path_epoch)
                     if metrics_validation['fde'] <= min_fde:
                         epoch_fde=epoch
-                        writer.add_scalar('epoch_fde', epoch_fde, epoch)
-                        writer.add_scalar('min_fde', min_fde, epoch)
-                        print('New low for min FDE_val, model saved')
-                        saved_model_FDE['epoch'] = epoch
-                        saved_model_FDE['policy_net_state'] = policy_net.state_dict()
-                        saved_model_FDE['policy_opt_state'] = policy_opt.state_dict()
-                        saved_model_FDE['discriminator_net_state'] = discriminator_net.state_dict()
-                        saved_model_FDE['discriminator_opt_state'] = discriminator_opt.state_dict()
-                        saved_model_FDE['ADE_val'] = metrics_validation['ade']
-                        # saved_model_FDE['ADE_train'] = metrics_train['ade']
-                        saved_model_FDE['FDE_val'] = metrics_validation['fde']
-                        # saved_model_FDE['FDE_train'] = metrics_train['fde']
-                        saved_model_FDE['policy-loss_val'] = loss_policy_val.item()
-                        saved_model_FDE['policy-loss_train'] = loss_policy.item()
-                        saved_model_FDE['discriminator-loss_val'] = loss_discriminator_val.item()
-                        saved_model_FDE['discriminator-loss_train'] = loss_discriminator.item()
-                        saved_model_FDE['value-loss_val'] = loss_value_val.item()
-                        saved_model_FDE['value-loss_train'] = loss_value.item()
-                        torch.save(saved_model_FDE, save_model_path_FDE)
-
+                        print("New low for min FDE_val, model saved")
+                        saved_model_FDE.update({
+                            'epoch': epoch,
+                            'policy_net_state': policy_net.state_dict(),
+                            'policy_opt_state': policy_opt.state_dict(),
+                            'discriminator_net_state': discriminator_net.state_dict(),
+                            'discriminator_opt_state': discriminator_opt.state_dict(),
+                            'ADE_val': metrics_validation['ade'],
+                            'ADE_train': metrics_train['ade'],
+                            'FDE_val': metrics_validation['fde'],
+                            'FDE_train': metrics_train['fde'],
+                            'policy-loss_val': loss_policy_val.item(),
+                            'policy-loss_train': loss_policy.item(),
+                            'discriminator-loss_val': loss_discriminator_val.item(),
+                            'discriminator-loss_train': loss_discriminator.item(),
+                            'value-loss_val': loss_value_val.item(),
+                            'value-loss_train': loss_value.item(),
+                        })
+                        # torch.save(saved_model_FDE, save_model_path_FDE)
+                        save_model_path_epoch = os.path.join(
+                            args.output_dir,
+                            f'model_FDE_{epoch}_trial_{trial.number}_policy_lr_{args.policy_lr}_disc_lr_{args.discriminator_lr}.pt'
+                        )
+                        torch.save(saved_model_FDE, save_model_path_epoch)
             t2 = time.time()
             print_time(t0, t1, t2, epoch)
+            log_memory_usage(f"Epoch {epoch}")
+        
+        clear_memory()
+        # final_metrics = {
+        # 'hparam/ADE_train': metrics_train['ade'],
+        # 'hparam/FDE_train': metrics_train['fde'],
+        # 'hparam/ADE_val': metrics_validation['ade'],
+        # 'hparam/FDE_val': metrics_validation['fde'],
+        # }
+    
+        log_dir = f"runs/trial_{trial.number}"
+
         return min_ade, min_fde, epoch_ade, epoch_fde
 
     """execute train loop"""
-    min_ade, min_fde, epoch_ade, epoch_fde=train_loop()
-    torch.cuda.empty_cache()
+    min_ade, min_fde, epoch_ade, epoch_fde = train_loop()
+    
+    print(f"Trial {trial.number} - ADE: {min_ade}, FDE: {min_fde}")
+    print(f"Trial {trial.number} - Params: {hparams}")
     return min_ade, min_fde, epoch_ade, epoch_fde
     # del policy_net
     # del discriminator_net
@@ -829,7 +773,20 @@ def validate(args, model, val_loader):
         metrics['fde'] = fde.avg
     return metrics
 
-
+def print_best_trial_so_far(study, trial):
+    with open('final_best_trial_params.txt', 'a') as f:
+            # 
+        f.write(f"Trial {trial.number} - ADE: {trial.value}\n")
+        f.write(f" Params: {trial.params}\n")
+        f.write("\nBest trial {} so far used the following hyper-parameters:".format(study.best_trial.number))
+        for key, value in study.best_trial.params.items():
+            f.write("{}: {}".format(key, value))
+        f.write("Best achived ADE {}\n".format(study.best_trial.value))
+        # Write final metrics to a file
+    # 
+    #     f.write(f"Trial {trial.number} - Best ADE: {ade}, Best FDE: {fde}\n")
+    #     f.write(f"Best Params: {hparams}\n")
+    #     f.write("\n")
 def cal_ade_fde(pred_traj_gt, pred_traj_fake):
     ade = displacement_error(pred_traj_fake, pred_traj_gt)
     fde = final_displacement_error(pred_traj_fake[-1], pred_traj_gt[-1])
@@ -844,69 +801,60 @@ else:
 model_name_ADE_base = args.save_model_name_ADE
 model_name_FDE_base = args.save_model_name_FDE
 import webbrowser
-
 def objective(args, trial):
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    # (args, study) =input
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-    # gc.collect()
-    # Example: Suggest a learning rate and dropout rate
-    # learning_rate=0.0005709531017751183
-    lr = trial.suggest_loguniform('lr', 5e-6, 9e-5)
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
-    args.learning_rate=learning_rate
-    # 0.00024036092775471976
-    optim_value_iternum=1
-    # optim_value_iternum=trial.suggest_categorical('optim_value_iternum', [1,3,5])
-    # l2_reg=trial.suggest_categorical('l2_reg', [0.0,0.2])
-    # ppo_clip=trial.suggest_categorical('ppo_clip', [0.1,0.2,0.4])
-    dropout_rate = 0 #trial.suggest_categorical('dropout',[0.0,0.2,0.5])
-    # batch_size = trial.suggest_categorical('batch_size', [16, 32, 64, 128, 512])
-    args.ppo_clip=0.2
-    ppo_iterations=trial.suggest_categorical('ppo_iterations', [8, 15])
-    args.optim_value_iternum=optim_value_iternum
-    args.lr = lr
-    args.ppo_iterations=ppo_iterations
-    
-    l2_reg=0.2
-    args.l2_reg=l2_reg
-    args.dropout = dropout_rate
-    # args.batch_size= batch_size
-    # Create a unique directory for each trial
-    print("TRIAL is logged as", trial._trial_id)
-    trial_dir = f"./optuna/trial_{ trial._trial_id}"
-    model_name_ADE = model_name_ADE_base + '_' + set + '_trial_run_' + str( trial._trial_id) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.learning_rate)+"_" +str(args.lr)+"_" +str(ppo_iterations)
-    model_name_FDE = model_name_FDE_base + '_' + set + '_trial_run_' + str( trial._trial_id) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.learning_rate)+"_" +str(args.lr)+"_" +str(ppo_iterations)
-    args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
-    args.save_model_name_ADE = model_name_ADE
-    args.save_model_name_FDE = model_name_FDE
+    # Suggest a learning rate for the policy network and the discriminator
+    policy_lr = trial.suggest_loguniform('policy_lr', 1e-5, 1e-2) #0.0003331799195227339 #
+    discriminator_lr = trial.suggest_loguniform('discriminator_lr', 1e-5, 1e-2) #0.0011562115934306177 #trial.suggest_loguniform('discriminator_lr', 1e-5, 1e-2)
+    args.policy_lr = policy_lr
+    args.discriminator_lr = discriminator_lr
+
+    # args.ppo_iterations = trial.suggest_categorical('ppo_iterations', [8, 15])
+    # args.l2_reg = 0.2
+    # args.dropout = 0.0
+
+    trial_dir = f"./optuna/trial_{trial.number}"
     os.makedirs(trial_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=trial_dir)
+
     hparams = {
-        'learning_rate_value': args.learning_rate,
-        'learning_rate_policy': args.lr,
+        'learning_rate_policy': args.policy_lr,
+        'learning_rate_discriminator': args.discriminator_lr,
         'ppo_iterations': args.ppo_iterations,
         'l2_reg': args.l2_reg,
         'dropout': args.dropout,
-        'batch_size': args.batch_size,  # Assuming you want to log this as well
+        'batch_size': args.batch_size,
         'ppo_clip': args.ppo_clip
     }
 
-    
-    # Assign these suggested values to args
     metric_dict = {
-    'ade': 0,  # You need to replace this with actual loss or another metric from your training loop
-    'fde': 0  # Placeholder, replace with your actual initial metric if applicable
-}
-    
+        'ade': 0,
+        'fde': 0
+    }
 
-    # Call your main training function here
-    ade, fde, ade_epoch, fde_epoch = main_loop(args, writer, metric_dict, hparams)
+    # Run main training loop with the current trial hyperparameters
+    ade, fde, ade_epoch, fde_epoch = main_loop(args, writer, metric_dict, hparams, trial)
+    # Save metrics in a dictionary
+    metric_dict['ade'] = ade
+    metric_dict['fde'] = fde
+    writer.add_hparams(
+            {
+                "lr": args.policy_lr,
+                "lr_disc": args.discriminator_lr,
+            },  metric_dict=metric_dict)
 
-    # gc.collect()
     writer.close()
+    trial.set_user_attr('best_ade', ade)
+    trial.set_user_attr('best_fde', fde)
+    trial.set_user_attr('best_params', hparams)
+
+    print(f"Trial {trial.number} - Best ADE: {ade}, Best FDE: {fde}")
+    print(f"Trial {trial.number} - Best Params: {hparams}")
+
     # Return a metric to minimize or maximize
-    return ade  # Let's minimize the Average Displacement Error (ADE)
+    return ade  # Minimize the Average Displacement Error (ADE)
 def load_or_create_study(study_name, storage_url):
     print("trying to load")
     return optuna.create_study(study_name=study_name, direction='minimize', storage=storage_url,  load_if_exists=True)
@@ -923,7 +871,7 @@ def run_study():
     # Add TensorBoardCallback to log results
     # tensorboard_callback = TensorBoardCallback("./optuna/", metric_name='ade')
     
-    study.optimize(partial(objective, args), n_trials=35, n_jobs=1)
+    study.optimize(partial(objective, args), n_trials=35, n_jobs=1, callbacks=[print_best_trial_so_far])
     
     print("Best trial:")
     print(" Value: ", study.best_trial.value)
@@ -934,7 +882,7 @@ for set in datasets:
 #     trial_dir = f"./optuna/trial_bla"
 #     model_name_ADE = model_name_ADE_base + '_' + set + '_trial_run_' + str( 1) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.l2_reg)+"_" +str(args.ppo_clip)+"_" +str(args.ppo_iterations)
 #     model_name_FDE = model_name_FDE_base + '_' + set + '_trial_run_' + str( 1) +"_Best_k_"+  str(args.lr)  +"_length_"+ str(args.dropout)+ "_bs_"+ str(args.batch_size) + "_" + str(args.l2_reg)+"_" +str(args.ppo_clip)+"_" +str(args.ppo_iterations)
-#     args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
+    args.resume = f'/home/ssukup/unified-pedestrian-path-prediction-framework/scripts/pretrained_STGAT/kbest_{args.best_k}/model_best_{args.dataset_name}_{0}.pth.tar'
 #     args.save_model_name_ADE = model_name_ADE
 #     args.save_model_name_FDE = model_name_FDE
 #     # os.makedirs(trial_dir, exist_ok=True)

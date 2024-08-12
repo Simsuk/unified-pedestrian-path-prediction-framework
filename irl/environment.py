@@ -1,6 +1,6 @@
 import torch
 import os
-
+import torch.nn.functional as F
 class Environment:
 
     def __init__(self, args, device):
@@ -39,7 +39,8 @@ class Environment:
         self.total_paths = obs_traj.shape[1]
         self.step_counter = 0
         self.path_counter = 0
-
+        self.mask_disc = [] #torch.empty(0, device='cuda')
+        self.pred_state_actions=[]
 
     def reset(self):
         # Get a batch of paths and permute them from (8, b, 2) to (b, 8, 2)
@@ -63,8 +64,11 @@ class Environment:
 
         state = state.to(self.device)   #(b, 16)
         action = action.to(self.device) #(b, 2)
-        if self.args.model=='stgat' and self.args.step_definition=='multi':
-            next_state = torch.cat((state, action), dim=1)[:, -self.obs_len*2:]  # (b, 16) appended action, discarded first time step
+        if self.args.model=='stgat' and self.args.step_definition=='multi': # HERE make cumulative state
+            if self.args.reward=='cumulative':
+                next_state = torch.cat((state, action), dim=1)
+            else:
+                next_state = torch.cat((state, action), dim=1)[:, -self.obs_len*2:]  # (b, 16) appended action, discarded first time step
         else:
             next_state = torch.cat((state, action), dim=1)[:, -self.obs_len*2:]  # (b, 16) appended action, discarded first time step
         reward = torch.zeros((state.shape[0], 1), device=self.device)
@@ -93,10 +97,33 @@ class Environment:
         gt_sum = torch.sum(gt, dim=1)
         gt = torch.flatten(gt, 1, 2)  # (b,24)
         # print("gt_env", gt.shape, os.path.basename(__file__))
-        if self.args.step_definition == 'single' or self.args.model=='stgat':
+        if self.args.step_definition == 'single':
             expert_single = torch.concat((state, gt), dim=1)   #(b,40)
             expert = expert_single
-
+            # HERE make cumulative expect which is ground truth in update_params
+        elif self.args.step_definition == 'multi' and self.args.model=='stgat':
+            if self.args.reward =='cumulative' and self.args.loss_definition=='l2':
+                expert_full = torch.concat((state, gt), dim=1)  # (b,40)
+                expert=expert_full
+            elif self.args.reward =='cumulative' and self.args.loss_definition=='discriminator':
+                sa_len = state.shape[1] + 2         # 16 + 2 = 18
+                expert_state_actions = []
+                expert_full = torch.concat((state, gt), dim=1)  # (b,40)
+                for i in range(self.args.pred_len):
+                    state_action = expert_full[:, :(i*2) + sa_len]   # sliding window of (b,variable length) for 12 steps
+                    padded_tensor = F.pad(state_action, (0, 40-state_action.shape[1])) # padds to size 40
+                    expert_state_actions.append(padded_tensor)
+                expert_multi = torch.cat(expert_state_actions, dim=0)     #(bx12, 40)
+                expert = expert_multi
+            else:
+                sa_len = state.shape[1] + 2         # 16 + 2 = 18
+                expert_state_actions = []
+                expert_full = torch.concat((state, gt), dim=1)  # (b,40)
+                for i in range(self.args.pred_len):
+                    state_action = expert_full[:, i*2:(i*2) + sa_len]   # sliding window of (b,18) for 12 steps
+                    expert_state_actions.append(state_action)
+                expert_multi = torch.cat(expert_state_actions, dim=0)     #(bx12, 18)
+                expert = expert_multi
         elif self.args.step_definition == 'multi' and self.args.model=='original':
             sa_len = state.shape[1] + 2         # 16 + 2 = 18
             expert_state_actions = []

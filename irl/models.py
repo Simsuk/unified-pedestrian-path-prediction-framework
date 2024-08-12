@@ -89,9 +89,10 @@ class Policy(nn.Module):
             id += 1
         return cov_inv.detach(), mean, {'std_id': std_id, 'std_index': std_index}
 
-
+def get_noise(shape):
+    return torch.randn(*shape).cuda()
 class Discriminator(nn.Module):
-    def __init__(self, num_inputs, hidden_size=(128, 128), activation='relu'):
+    def __init__(self, num_inputs, hidden_size=(256, 256), activation='relu'):
         super().__init__()
         if activation == 'tanh':
             self.activation = torch.tanh
@@ -101,9 +102,12 @@ class Discriminator(nn.Module):
             self.activation = torch.sigmoid
 
         self.affine_layers = nn.ModuleList()
+        self.dropout_layers = nn.ModuleList()
         last_dim = num_inputs
         for nh in hidden_size:
             self.affine_layers.append(nn.Linear(last_dim, nh))
+            self.affine_layers.append(nn.BatchNorm1d(nh)) 
+            # self.dropout_layers.append(nn.Dropout(p=0.5)) 
             last_dim = nh
 
         # last_dim = last_dim * 2                 # added for shape fix
@@ -112,12 +116,66 @@ class Discriminator(nn.Module):
         self.logic.bias.data.mul_(0.0)
 
     def forward(self, x):
+        # noise = get_noise(x.shape)*0.01
+        # x = x + noise
         for affine in self.affine_layers:
             x = self.activation(affine(x))
         # x = torch.reshape(x, (x.shape[0], x.shape[1]*x.shape[2]))   # added for shape fix
         preprob = self.logic(x)
         prob = torch.sigmoid(preprob)
         return prob # [b,1]
+import torch
+import torch.nn as nn
+
+class TrajectoryDiscriminator(nn.Module):
+    def __init__(self, num_inputs, seq_len, hidden_dim, activation='relu'):
+        super(TrajectoryDiscriminator, self).__init__()
+
+        # Activation function
+        if activation == 'tanh':
+            self.activation = torch.tanh
+        elif activation == 'relu':
+            self.activation = torch.nn.ReLU(inplace=False)
+        elif activation == 'sigmoid':
+            self.activation = torch.sigmoid
+
+        self.seq_len = seq_len
+        self.hidden_dim = hidden_dim
+
+        # Unidirectional LSTM layer
+        self.lstm = nn.LSTM(input_size=num_inputs, hidden_size=self.hidden_dim, num_layers=1, batch_first=True)
+        
+        # Fully connected layers (more shallow)
+        self.fc = nn.Sequential(
+            nn.Linear(self.hidden_dim * self.seq_len, 128),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
+            nn.Linear(128, 1),
+            nn.Sigmoid()  # For binary classification: real or fake
+        )
+
+    def forward(self, traj):
+        # traj shape: (batch_size, seq_len * traj_dim)
+        batch_size = traj.size(0)
+        
+        # Reshape the input to (batch_size, seq_len, traj_dim)
+        traj = traj.view(batch_size, self.seq_len, -1)  # Assuming inferred traj_dim
+        
+        # Ensure the input dimension matches num_inputs
+        input_dim = traj.size(2)
+        assert input_dim == 2, f"Expected input dimension of 2, but got {input_dim}"
+
+        # LSTM output
+        lstm_out, _ = self.lstm(traj)  # lstm_out shape: (batch_size, seq_len, hidden_dim)
+
+        # Flatten the LSTM output
+        lstm_out_flat = lstm_out.contiguous().view(batch_size, -1)  # lstm_out_flat shape: (batch_size, seq_len * hidden_dim)
+        
+        # Pass through fully connected layers
+        out = self.fc(lstm_out_flat)
+        
+        return out
+# Example usage
 
 
 class Value(nn.Module):

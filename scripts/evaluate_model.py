@@ -35,14 +35,14 @@ torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = True
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_name', default='eth', type=str)
-parser.add_argument('--model_path', default="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/PPO_ONLY/superparam_search/lr_iters_10_or_15") # "../models/model_average" "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt", type=str) #../models/model_average
+parser.add_argument('--model_path', default="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_GAN/1v1_12/model_FDE_317_trial_22_policy_lr_0.00022019087448896273_disc_lr_0.000444648230655054.pt") # "../models/model_average" "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt", type=str) #../models/model_average
 parser.add_argument('--dset_type', default='test', type=str)
-parser.add_argument('--model_average', default=True, type=bool)
+parser.add_argument('--model_average', default=False, type=bool)
 parser.add_argument('--runs', type=int, default=5, help='number of models to compute average')
 parser.add_argument('--prediction_steps', default=None, type=int)
-parser.add_argument('--noise', default=False, type=bool)             # add noise to deterministic models to add stochasticity
+parser.add_argument('--noise', default=False, type=bool)             # add noise to deterministic models to add stochasticity, False if stgat because noise is added automatically in model
 parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
-parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
+parser.add_argument('--randomness_definition', default='deterministic',  type=str, help='either stochastic or deterministic')
 
 
 # STGAT #######################################
@@ -319,13 +319,13 @@ class fake_env():
         self.training_step=training_step
 def main(args):
     if args.model_average:
-        args.model_path ="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE/with_pretrained_without_scene/1v1_12/AGAIN_2_9_making_sure" #"../models/model_average" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" #"../models/model_average" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" # 
+        args.model_path ="/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE/with_pretrained_without_scene/1v1_12/again_again" #"../models/model_average" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" #"../models/model_average" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt" # 
         ADE = []
         FDE = []
         minADE = []
         minFDE = []
     else:
-        args.model_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/PPO_ONLY/saved_model_ADE_zara1_run_0_Best_k_1_length_12.pt'#'/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt' #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_zara1_run_0_Best_k_1_length_12.pt" #"../models/irl-models" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"# #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/hyperparam_opt/saved_model_ADE_eth_trial_run_3_Best_k_0.0005709531017751183_length_0_bs_64.pt"# "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"#"../models/irl-models" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #
+        args.model_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/Results_GAN/1v1_12/saved_model_FDE_317_trial_22_policy_lr_0.00022019087448896273_disc_lr_0.000444648230655054.pt'#'/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt' #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_zara1_run_0_Best_k_1_length_12.pt" #"../models/irl-models" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"# #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/hyperparam_opt/saved_model_ADE_eth_trial_run_3_Best_k_0.0005709531017751183_length_0_bs_64.pt"# "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"#"../models/irl-models" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #
         list_to_sort = []
 
     # if seeding:
@@ -383,6 +383,7 @@ def main(args):
         policy_net = get_policy(args,args.model,checkpoint)
         # print("lr", checkpoint['lr'])
         _args = AttrDict(checkpoint['args'])
+        print("Fixed noise loaded:", torch.equal(policy_net.fixed_noise, checkpoint['policy_net_state']['fixed_noise']))
         # print("LR", _args.lr)
         # print("EPOCH", checkpoint['epoch'])
         # _args.randomness_definition='stochastic'
@@ -412,7 +413,7 @@ def main(args):
         path = get_dset_path(_args.dataset_name, args.dset_type)
         _, loader = data_loader(_args, path)
         print(_args.randomness_definition)
-        ade, fde = evaluate_irl(env,_args, loader, policy_net, 1, mean_action=False, noise=False, device=device)
+        ade, fde = evaluate_irl(env,_args, loader, policy_net, 1, mean_action=True, noise=False, device=device)
         metrics['ade'].append(ade)
         metrics['fde'].append(fde)
 
