@@ -89,13 +89,13 @@ parser.add_argument("--model", default="stgat", help="The learning model method.
 parser.add_argument("--pretraining", default=False, help="pretraining in first 2 phases or not")
 parser.add_argument("--l2_reg", default=0.0, help="PPO_regularization")
 
-parser.add_argument("--reward", default="window", help="type of reward/action definition, either cumulative or window (rolling window)")
+parser.add_argument("--reward", default="cumulative", help="type of reward/action definition, either cumulative or window (rolling window)")
 
 parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
 parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
 parser.add_argument('--loss_definition', default='discriminator',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
-parser.add_argument('--discount_factor', type=float, default=1, help='discount factor gamma, value between 0.0 and 1.0')
+parser.add_argument('--discount_factor', type=float, default=0.3, help='discount factor gamma, value between 0.0 and 1.0')
 parser.add_argument('--optim_value_iternum', type=int, default=1, help='minibatch size')
 
 parser.add_argument('--training_algorithm', default='reinforce',  type=str, help='choose which RL updating algorithm, either "reinforce", "baseline" or "ppo" or "ppo_only"')
@@ -171,7 +171,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr",
-    default=  0.00011557805848539156, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    default=  0.0003343163137042795, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
     type=float,
     metavar="LR",
     help="initial learning rate",
@@ -179,7 +179,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr_disc",
-    default=  0.0028904143728086026, #0.00058904143728086026, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
+    default=  0.0006532448752650618, #0.00058904143728086026, #=1e-3 #8.623230816228654e-05 #0.00024036092775471976
     type=float,
     metavar="LR-disc",
     help="initial learning rate of discriminator",
@@ -314,11 +314,11 @@ def main_loop(writer):
                 # )
         writer.close()
     disc_single = Discriminator(40) #40
-    disc_multi = Discriminator_LSTM() #Discriminator(18)
+    disc_multi = Discriminator_LSTM(40) #Discriminator(18)
     
     if args.step_definition == 'multi':
         discriminator_net = disc_multi
-        discriminator_net.apply(initialize_weights)
+        # discriminator_net.apply(initialize_weights) #should be used for determinisitc 
     elif args.step_definition == 'single':
         if args.model=='original':
          discriminator_net = disc_single      #changed from single as experiment
@@ -533,7 +533,7 @@ def main_loop(writer):
                 else:     
                        state_action =torch.cat((state, action), dim=1)
                        padded_tensor = F.pad(state_action, (0, 40-state_action.shape[1])) # padds to size 40
-                       mask = padded_tensor == 0  
+                       mask = padded_tensor != 0  
                        disc_out = discriminator_net(padded_tensor, mask)
             labels = torch.ones_like(disc_out)
             expert_reward = -custom_reward(disc_out, labels)  # pytorch nn.BCELoss() already has a -

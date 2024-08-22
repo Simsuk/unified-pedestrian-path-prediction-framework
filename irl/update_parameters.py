@@ -131,10 +131,10 @@ def discriminator_step(args,env, discriminator_net, discriminator_opt, discrimin
                     g_o = discriminator_net(pred_state_actions)
                     e_o = discriminator_net(expert_state_actions)
                 else:
+                    g_o = discriminator_net(pred_state_actions, env.mask_disc)
+                    e_o = discriminator_net(expert_state_actions, env.mask_disc)
                     # print("end=env.seq_start_end",env.seq_start_end[-1])
                     # print("pred_state_actions", pred_state_actions.shape)
-                    g_o = discriminator_net(pred_state_actions,  obs_traj_pos=None,  seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # generated/policy scores
-                    e_o = discriminator_net(expert_state_actions, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)  # expert scores
     # writer.add_histogram('pred_state_actions', pred_state_actions.detach().cpu().numpy().astype(np.float32),  global_step=epoch)
     # writer.add_histogram('g_o', g_o.detach().cpu().numpy().astype(np.float32),  global_step=epoch)
     # writer.add_histogram('e_o', e_o.detach().cpu().numpy().astype(np.float32),  global_step=epoch)
@@ -151,7 +151,7 @@ def discriminator_step(args,env, discriminator_net, discriminator_opt, discrimin
     for param in discriminator_net.parameters():
         if param.requires_grad:
             l2_reg = l2_reg + torch.norm(param, 2)
-    lambda_l2=0.01 # 0.3 for GAN
+    lambda_l2=0.03 # 0.3 for GAN
     discrim_loss = discrim_loss + lambda_l2 * l2_reg
     l2_reg=l2_reg.detach()
     del l2_reg

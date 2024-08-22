@@ -15,6 +15,7 @@ import logging
 import gc
 import sys
 import optuna
+from optuna import TrialPruned
 class Profile:
     def __init__(self):
         self.prof = cProfile.Profile()
@@ -56,7 +57,7 @@ import logging
 import psutil
 from torch.utils.tensorboard import SummaryWriter
 import psutil
- 
+import torch.nn.functional as F
 torch.set_num_threads(32)
 from scripts.evaluate_model import evaluate_irl
 
@@ -98,7 +99,7 @@ parser.add_argument("--l2_reg", default=0.0, help="PPO_regularization")
 parser.add_argument("--reward", default="cumulative", help="type of reward/action definition, either cumulative or window (rolling window)")
 
 parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
-parser.add_argument('--step_definition', default='single',  type=str, help='either single or multi')
+parser.add_argument('--step_definition', default='multi',  type=str, help='either single or multi')
 parser.add_argument('--loss_definition', default='discriminator',  type=str, help='either discriminator or l2')
 parser.add_argument('--disc_type', default='original', type=str, help='either stgat or original')
 parser.add_argument('--discount_factor', type=float, default=1, help='discount factor gamma, value between 0.0 and 1.0')
@@ -111,7 +112,7 @@ parser.add_argument('--ppo-clip', type=float, default=0.2, help='amount of ppo c
 parser.add_argument('--learning-rate', type=float, default=0.001, metavar='G', help='learning rate (default: 1e-5)')
 parser.add_argument('--batch_size', default=64, type=int, help='number of sequences in a batch (can be multiple paths)')
 parser.add_argument('--log-std', type=float, default=-2.99, metavar='G', help='log std for the policy (default=-0.0)')
-parser.add_argument('--num_epochs', default=330, type=int, help='number of times the model sees all data')
+parser.add_argument('--num_epochs', default=340, type=int, help='number of times the model sees all data')
 
 parser.add_argument('--seeding', type=bool, default=True, help='turn seeding on or off')
 parser.add_argument('--seed', type=int, default=73, metavar='N', help='random seed (default: 0)')
@@ -135,7 +136,7 @@ parser.add_argument('--skip', default=1, type=int, help='used for skipping seque
 parser.add_argument('--delim', default='\t', help='how to read the data text file spacing')
 parser.add_argument('--l2_loss_weight', default=1, type=float, help='l2 loss multiplier (default=0)')
 parser.add_argument('--use_gpu', default=1, type=int)                   # use gpu, if 0, use cpu only
-parser.add_argument('--gpu-index', type=int, default=1, metavar='N')
+parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
 parser.add_argument('--load_saved_model', default=None, metavar='G', help='path of pre-trained model')
 #STGAT ==========================================================
 
@@ -192,7 +193,7 @@ parser.add_argument(
 
 parser.add_argument("--best_k", default=1, type=int)
 parser.add_argument("--print_every", default=10, type=int)
-parser.add_argument("--gpu_num", default="1", type=str)
+parser.add_argument("--gpu_num", default="0", type=str)
 
 parser.add_argument(
     "--resume",
@@ -287,7 +288,7 @@ def main_loop(args, writer, metric_dict, hparams, trial):
 
     if args.step_definition == 'multi':
         disc_single = Discriminator(40)
-        disc_multi = Discriminator(18)
+        disc_multi = Discriminator_LSTM(40)  #Discriminator(18)
         discriminator_net = disc_multi
     elif args.step_definition == 'single':
         if args.model == 'original':
@@ -464,18 +465,26 @@ def main_loop(args, writer, metric_dict, hparams, trial):
         discriminator_opt.load_state_dict(saved_model['discriminator_opt_state'])
 
     """custom reward for policy"""
-    def expert_reward(env, args, state, action, gt=0):
-        state_action = torch.cat((state, action), dim=1)
+    def expert_reward(env, args, state, action, gt=0):     # probs separate function for discount
+        # print(args)
+        state_action = torch.cat((state, action), dim=1)  # (b, 16) + (b, 24) = (b, 40)
         if args.loss_definition == 'discriminator':
-            if args.model == 'original' or args.disc_type == 'original':
+            if args.model=='original' and args.disc_type=='original':
                 disc_out = discriminator_net(state_action)
-            elif args.model == 'stgat':
-                if env.training_step == 1 or env.training_step == 2:
-                    disc_out = discriminator_net(state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
-                else:
-                    disc_out = discriminator_net(state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=0, training_step=env.training_step)
+            elif args.model=='stgat':
+                if args.step_definition=='single':
+                    if env.training_step == 1 or env.training_step == 2:
+                        disc_out = discriminator_net(state_action)
+                    else:
+                        disc_out = discriminator_net(state_action)
+                else:     
+                       state_action =torch.cat((state, action), dim=1)
+                       padded_tensor = F.pad(state_action, (0, 40-state_action.shape[1])) # padds to size 40
+                       mask = padded_tensor == 0  
+                       disc_out = discriminator_net(padded_tensor, mask)
             labels = torch.ones_like(disc_out)
-            expert_reward = -custom_reward(disc_out, labels)
+            expert_reward = -custom_reward(disc_out, labels)  # pytorch nn.BCELoss() already has a -
+
         elif args.loss_definition == 'l2':
             if args.model == "original":
                 l2 = (gt - state_action) ** 2
@@ -498,6 +507,7 @@ def main_loop(args, writer, metric_dict, hparams, trial):
 
     """update parameters function"""
     def update_params(args, batch, expert, train, epoch):
+
         loss_policy = 0
         loss_discriminator = 0
         loss_value = 0
@@ -510,11 +520,19 @@ def main_loop(args, writer, metric_dict, hparams, trial):
                 if args.step_definition == 'single':
                     expert_state_actions = expert
                     pred_state_actions = torch.cat([states, actions], dim=1)
+                    
+                    # print(" expert_state_actions, pred_state_actions",  expert_state_actions, pred_state_actions)
+
+                    # print(" expert_state_actions, pred_state_actions",  expert_state_actions.shape, pred_state_actions.shape)
                 elif args.step_definition == 'multi':
-                    expert_state_actions = expert
-                    pred_state_actions = torch.cat([states_all[0], actions_all[0]], dim=1)
-                discriminator_loss = discriminator_step(args, env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train, epoch, writer)
+                    expert_state_actions = expert   # (bx12, 40)
+                    pred_state_actions=env.pred_state_actions  # (bx12, 40)
+                    
+                    # pred_state_actions = torch.cat([states_all[0], actions_all[0]], dim=1)  #(bx12, 18)
+                    #state_action, obs_traj_pos=None, seq_start_end=env.seq_start_end, teacher_forcing_ratio=1, training_step=env.training_step)
+                discriminator_loss = discriminator_step(args,env, discriminator_net, discriminator_opt, discriminator_crt, expert_state_actions, pred_state_actions, device, train, epoch, writer)
                 loss_discriminator += discriminator_loss
+
 
         """perform policy (REINFORCE) update"""
         for _ in range(args.policy_steps):
@@ -713,7 +731,16 @@ def main_loop(args, writer, metric_dict, hparams, trial):
         # }
     
         log_dir = f"runs/trial_{trial.number}"
-
+                # If loss exceeds the threshold, stop the trial
+        if min_ade > 20:
+            raise TrialPruned(f"Trial pruned at epoch {epoch} due to high loss: {min_ade}")
+        
+        # Optionally, report intermediate results
+        trial.report(min_ade, epoch)
+        
+        # Check if the trial should be pruned based on intermediate results
+        if trial.should_prune():
+            raise TrialPruned(f"Trial pruned at epoch {epoch}")
         return min_ade, min_fde, epoch_ade, epoch_fde
 
     """execute train loop"""

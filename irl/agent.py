@@ -91,7 +91,7 @@ def collect_samples(args, env, policy, custom_reward, device, mean_action,  trai
             states.append(state)
             state_action =torch.cat((state, action), dim=1)
             padded_tensor = F.pad(state_action, (0, 40-state_action.shape[1])) 
-            mask = padded_tensor == 0  
+            mask = padded_tensor != 0   
             env.mask_disc.append(mask)
             env.pred_state_actions.append(padded_tensor)
             next_state, reward, done, = env.step(state, action)

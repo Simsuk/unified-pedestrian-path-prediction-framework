@@ -42,7 +42,7 @@ parser.add_argument('--runs', type=int, default=5, help='number of models to com
 parser.add_argument('--prediction_steps', default=None, type=int)
 parser.add_argument('--noise', default=False, type=bool)             # add noise to deterministic models to add stochasticity, False if stgat because noise is added automatically in model
 parser.add_argument("--model", default="stgat", help="The learning model method. Current models: original or stgat")
-parser.add_argument('--randomness_definition', default='deterministic',  type=str, help='either stochastic or deterministic')
+parser.add_argument('--randomness_definition', default='stochastic',  type=str, help='either stochastic or deterministic')
 
 
 # STGAT #######################################
@@ -325,7 +325,7 @@ def main(args):
         minADE = []
         minFDE = []
     else:
-        args.model_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/Results_GAN/1v1_12/saved_model_FDE_317_trial_22_policy_lr_0.00022019087448896273_disc_lr_0.000444648230655054.pt'#'/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt' #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_zara1_run_0_Best_k_1_length_12.pt" #"../models/irl-models" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"# #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/hyperparam_opt/saved_model_ADE_eth_trial_run_3_Best_k_0.0005709531017751183_length_0_bs_64.pt"# "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"#"../models/irl-models" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #
+        args.model_path = '/home/ssukup/unified-pedestrian-path-prediction-framework/IRL/opt/saved_model_FDE_318_trial_32_policy_lr_0.0003343163137042795_disc_lr_0.0006532448752650618.pt'#'/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt' #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_zara1_run_0_Best_k_1_length_12.pt" #"../models/irl-models" # "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"# #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/hyperparam_opt/saved_model_ADE_eth_trial_run_3_Best_k_0.0005709531017751183_length_0_bs_64.pt"# "/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/Baseline_with_pretrained/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"#"../models/irl-models" #"/home/ssukup/unified-pedestrian-path-prediction-framework/Results_SL_MSE_SPG/with_pretrained_without_scene/1v1_12/saved_model_ADE_eth_run_0_Best_k_1_length_12.pt"  #
         list_to_sort = []
 
     # if seeding:
@@ -383,7 +383,7 @@ def main(args):
         policy_net = get_policy(args,args.model,checkpoint)
         # print("lr", checkpoint['lr'])
         _args = AttrDict(checkpoint['args'])
-        print("Fixed noise loaded:", torch.equal(policy_net.fixed_noise, checkpoint['policy_net_state']['fixed_noise']))
+        # print("Fixed noise loaded:", torch.equal(policy_net.fixed_noise, checkpoint['policy_net_state']['fixed_noise']))
         # print("LR", _args.lr)
         # print("EPOCH", checkpoint['epoch'])
         # _args.randomness_definition='stochastic'
